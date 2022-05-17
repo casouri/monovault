@@ -1,7 +1,10 @@
 use crate::types::*;
 use serde::{de::DeserializeOwned, Serialize};
+use std::boxed::Box;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 // ROOT of the data base is basically /db, where / is the mounting
@@ -13,13 +16,25 @@ use std::path::{Path, PathBuf};
 // The simplest implementation is just serialize the value to string,
 // and store as a file. Eg, set("/a/b", stuff) -> hash /a/b to
 // 1220338343, and store serialized stuff under /db/kv/1220338343.
+
+/// Database provides object storage and key-value storage.
 #[derive(Debug)]
 pub struct Database {
     root: PathBuf,
+    hasher: Box<DefaultHasher>,
 }
 
 impl Database {
     pub fn new(root: &Path) -> VaultResult<Database> {
+        Ok(Database {
+            root: root.to_path_buf(),
+            hasher: Box::new(DefaultHasher::new()),
+        })
+    }
+    pub fn open(path: &Path) -> VaultResult<()> {
+        todo!()
+    }
+    pub fn file_exists(path: &Path) -> VaultResult<bool> {
         todo!()
     }
     // Read and write are used for storing file data.
@@ -37,7 +52,7 @@ impl Database {
     pub fn set<T: Serialize>(path: &Path, value: Option<T>) -> VaultResult<()> {
         todo!()
     }
-    pub fn get<T: DeserializeOwned>(path: &Path) -> VaultResult<T> {
+    pub fn get<T: DeserializeOwned>(path: &Path) -> VaultResult<Option<T>> {
         todo!()
     }
 }

@@ -1,6 +1,7 @@
 use std::boxed::Box;
 use std::collections::HashMap;
 use std::fs::File;
+use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -24,17 +25,16 @@ pub enum VaultError {
     WriteConflict(String, u64, u64),
 }
 
-pub enum OpenMode {
-    Read,
-    ReadWrite,
-    CreateReadWrite,
-}
-
 pub trait Vault {
     fn read(&self, file: &Path, offset: u64) -> VaultResult<Vec<u8>>;
     fn write(&self, file: &Path, offset: u64, data: Vec<u8>) -> VaultResult<u64>;
-    fn open(&self, file: &Path, mode: OpenMode) -> VaultResult<()>;
+    /// We only care about read, write and create flag in `mode`.
+    /// There is no permission checking so we don't need to return a
+    /// file descriptor.
+    fn open(&self, file: &Path, mode: OpenOptions) -> VaultResult<()>;
     fn close(&self, file: &Path) -> VaultResult<()>;
-    fn mkdir(&self, parent: &Path, name: String) -> VaultResult<()>;
     fn delete(&self, file: &Path) -> VaultResult<()>;
+    fn mkdir(&self, parent: &Path, name: String) -> VaultResult<()>;
+    fn readdir(&self, dir: &Path) -> VaultResult<Vec<String>>;
+    fn rmdir(&self, dir: &Path) -> VaultResult<()>;
 }
