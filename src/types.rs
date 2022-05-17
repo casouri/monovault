@@ -27,6 +27,7 @@ pub enum VaultError {
 pub enum OpenMode {
     Read,
     ReadWrite,
+    CreateReadWrite,
 }
 
 pub trait Vault {
@@ -35,4 +36,5 @@ pub trait Vault {
     fn open(&self, file: &Path, mode: OpenMode) -> VaultResult<()>;
     fn close(&self, file: &Path) -> VaultResult<()>;
     fn mkdir(&self, parent: &Path, name: String) -> VaultResult<()>;
+    fn delete(&self, file: &Path) -> VaultResult<()>;
 }

@@ -26,4 +26,7 @@ impl Vault for RemoteVault {
     fn mkdir(&self, parent: &Path, name: String) -> VaultResult<()> {
         todo!()
     }
+    fn delete(&self, file: &Path) -> VaultResult<()> {
+        todo!()
+    }
 }

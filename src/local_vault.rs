@@ -7,9 +7,23 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+// Vault should just use the database to implement everything. Databse
+// allows you to store files very easily, the main thing local_vault
+// needs to do is manage the directories: When creating a file, we
+// need to update the parent directory to add this file. I would use
+// the key-value store (set, get) to implement directories, where each
+// directory is a vector of file names under it. Then we opening or
+// deleting files, we can just "get" the directory's content, remove
+// or add to it and "set" it back.
 #[derive(Debug)]
 pub struct LocalVault {
     database: Arc<Database>,
+}
+
+impl LocalVault {
+    pub fn new(database: Arc<Database>) -> VaultResult<LocalVault> {
+        todo!()
+    }
 }
 
 impl Vault for LocalVault {
@@ -26,6 +40,9 @@ impl Vault for LocalVault {
         todo!()
     }
     fn mkdir(&self, parent: &Path, name: String) -> VaultResult<()> {
+        todo!()
+    }
+    fn delete(&self, file: &Path) -> VaultResult<()> {
         todo!()
     }
 }
