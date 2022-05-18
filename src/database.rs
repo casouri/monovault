@@ -31,28 +31,28 @@ impl Database {
             hasher: Box::new(DefaultHasher::new()),
         })
     }
-    pub fn open(path: &Path) -> VaultResult<()> {
+    pub fn open(&self, path: &Path) -> VaultResult<()> {
         todo!()
     }
-    pub fn file_exists(path: &Path) -> VaultResult<bool> {
+    pub fn file_exists(&self, path: &Path) -> VaultResult<bool> {
         todo!()
     }
     // Read and write are used for storing file data.
-    pub fn read(path: &Path, offset: u64) -> VaultResult<Vec<u8>> {
+    pub fn read(&self, path: &Path, offset: u64) -> VaultResult<Vec<u8>> {
         todo!()
     }
-    pub fn write(path: &Path, offset: u64, data: Vec<u8>) -> VaultResult<u64> {
+    pub fn write(&self, path: &Path, offset: u64, data: Vec<u8>) -> VaultResult<u64> {
         todo!()
     }
-    pub fn delete(path: &Path) -> VaultResult<()> {
+    pub fn delete(&self, path: &Path) -> VaultResult<()> {
         todo!()
     }
     // Set and get are used for storing metadata, like directory,
     // version, etc. Setting None means delete the value.
-    pub fn set<T: Serialize>(path: &Path, value: Option<T>) -> VaultResult<()> {
+    pub fn set<T: Serialize>(&self, path: &Path, value: Option<T>) -> VaultResult<()> {
         todo!()
     }
-    pub fn get<T: DeserializeOwned>(path: &Path) -> VaultResult<Option<T>> {
-        todo!()
+    pub fn get<T: DeserializeOwned>(&self, path: &Path) -> VaultResult<Option<T>> {
+        todo!();
     }
 }
