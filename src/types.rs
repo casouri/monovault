@@ -1,7 +1,6 @@
 use std::boxed::Box;
 use std::collections::HashMap;
-use std::fs::File;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -23,6 +22,27 @@ pub enum VaultError {
     NetworkError(Box<dyn std::error::Error>),
     Unknown(Box<dyn std::error::Error>),
     WriteConflict(String, u64, u64),
+    SqliteError(rusqlite::Error),
+    MarshallError(serde_json::Error),
+    IOError(std::io::Error),
+}
+
+impl From<rusqlite::Error> for VaultError {
+    fn from(err: rusqlite::Error) -> Self {
+        VaultError::SqliteError(err)
+    }
+}
+
+impl From<serde_json::Error> for VaultError {
+    fn from(err: serde_json::Error) -> Self {
+        VaultError::MarshallError(err)
+    }
+}
+
+impl From<std::io::Error> for VaultError {
+    fn from(err: std::io::Error) -> Self {
+        VaultError::IOError(err)
+    }
 }
 
 pub trait Vault {
