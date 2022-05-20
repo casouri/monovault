@@ -1,4 +1,5 @@
 use crate::types::*;
+use rusqlite::params;
 use rusqlite::OptionalExtension;
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::hash_map::DefaultHasher;
@@ -29,9 +30,27 @@ impl Database {
         let db_path = root.join("store.sqlite3");
         let connection = rusqlite::Connection::open(&db_path)?;
         connection.execute(
-            "create table if not exists Store (
-key char(512) primary key,
-value char(128)
+            "create table if not exists HasChild (
+parent int,
+child int,
+primary key (parent, child)
+);",
+            [],
+        )?;
+        connection.execute(
+            "create table if not exists Type (
+file int,
+name char(100),
+type int,
+primary key (dir)
+);",
+            [],
+        )?;
+        connection.execute(
+            "create table if not exists Inode (
+only int
+inode int
+primary key (only)
 );",
             [],
         )?;
@@ -42,78 +61,91 @@ value char(128)
         })
     }
 
-    fn real_path(&mut self, path: &Path) -> PathBuf {
-        let hasher = &mut self.hasher;
-        path.to_string_lossy().into_owned().hash(hasher);
-        let name = hasher.finish().to_string();
-        let real_path = self.root.join(name).to_path_buf();
-        real_path
+    pub fn path(&self) -> PathBuf {
+        self.root.clone()
     }
 
-    pub fn open(&mut self, path: &Path, option: OpenOptions) -> VaultResult<File> {
-        let real_path = self.real_path(path);
-        let file = option.open(real_path)?;
-        Ok(file)
-    }
-
-    pub fn file_exists(&mut self, path: &Path) -> VaultResult<bool> {
-        let real_path = self.real_path(path);
-        let file_exists = real_path.exists();
-        Ok(file_exists)
-    }
-
-    fn key_exists(&mut self, path: &Path) -> VaultResult<bool> {
-        let path_str = path.to_string_lossy().into_owned();
-        let result: Option<String> = self
+    pub fn largest_inode(&mut self) -> Inode {
+        match self
             .db
-            .query_row("select value from Store where key = ?", [path_str], |row| {
-                row.get(0)
-            })
-            .optional()?;
-        match result {
-            None => Ok(false),
-            Some(data) => Ok(true),
+            .query_row("select inode from Type order by inode desc", [], |row| {
+                Ok(row.get(0)?)
+            }) {
+            Ok(inode) => inode,
+            _ => 1024,
         }
     }
 
-    pub fn delete(&mut self, path: &Path) -> VaultResult<()> {
-        let real_path = self.real_path(path);
-        if !real_path.exists() {
-            return Err(VaultError::FileNotExist(
-                path.to_string_lossy().into_owned(),
-            ));
-        }
-        Ok(std::fs::remove_file(real_path)?)
-    }
-
-    // Set and get are used for storing metadata, like directory,
-    // version, etc. Setting None means delete the value.
-    pub fn set<T: Serialize>(&mut self, path: &Path, value: Option<T>) -> VaultResult<()> {
+    /// We don' check for duplicate, etc for now.
+    pub fn add_file(
+        &mut self,
+        parent: Inode,
+        child: Inode,
+        name: &str,
+        kind: VaultFileType,
+    ) -> VaultResult<()> {
         let transaction = self.db.transaction()?;
-        transaction.execute("delete from Store where key=?", [path.to_str()])?;
-        if let Some(val) = value {
-            let val_str = serde_json::to_string(&val)?;
-            let path_str = path.to_string_lossy().into_owned();
-            transaction.execute(
-                "insert into Store (key, value) values (?, ?)",
-                [path_str, val_str],
-            )?;
-        }
+        let type_val = match kind {
+            VaultFileType::File => 0,
+            VaultFileType::Directory => 1,
+        };
+        transaction.execute(
+            "insert into Type (file, name, type) vaules (?, ?, ?)",
+            params![child, name.to_string(), type_val],
+        )?;
+        transaction.execute(
+            "insert into HasChild (parent, child) vaules (?, ?)",
+            [parent, child],
+        )?;
         transaction.commit()?;
         Ok(())
     }
 
-    pub fn get<T: DeserializeOwned>(&mut self, path: &Path) -> VaultResult<Option<T>> {
-        let path_str = path.to_string_lossy().into_owned();
-        let result: Option<String> = self
+    /// We don't check for consistency for now.
+    pub fn remove_file(&mut self, child: Inode) -> VaultResult<()> {
+        let parent = self.db.query_row(
+            "select parent from HasChild where child=?",
+            [child],
+            |row| Ok(row.get(0)?),
+        )?;
+        let transaction = self.db.transaction()?;
+        transaction.execute(
+            "delete from HasChild where parent=? and child=?",
+            [parent, child],
+        )?;
+        transaction.execute("delete from Type where file=?", [child])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn readdir(&mut self, file: Inode) -> VaultResult<Vec<DirEntry>> {
+        let mut statment = self
             .db
-            .query_row("select value from Store where key = ?", [path_str], |row| {
-                row.get(0)
-            })
-            .optional()?;
-        match result {
-            None => Ok(None),
-            Some(data) => Ok(Some(serde_json::from_str(&data)?)),
+            .prepare("select child from HasChild where parent=?")?;
+        let children = statment.query_map([file], |row| Ok(row.get(0)?))?;
+        let mut result = vec![];
+        for child in children {
+            let child: u64 = child.unwrap();
+            let entry =
+                self.db
+                    .query_row("select name, type from Type where file=?", [child], |row| {
+                        Ok(DirEntry {
+                            inode: child,
+                            name: row.get(0).unwrap(),
+                            kind: match row.get::<_, i32>(1) {
+                                Ok(ty) => {
+                                    if ty == 0 {
+                                        Ok(VaultFileType::File)
+                                    } else {
+                                        Ok(VaultFileType::Directory)
+                                    }
+                                }
+                                Err(err) => Err(err),
+                            }?,
+                        })
+                    })?;
+            result.push(entry);
         }
+        Ok(result)
     }
 }

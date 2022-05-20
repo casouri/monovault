@@ -1,6 +1,6 @@
-mod database;
-mod fuse;
-mod local_vault;
-mod remote_vault;
-mod types;
-mod vault_server;
+pub mod database;
+pub mod fuse;
+pub mod local_vault;
+pub mod remote_vault;
+pub mod types;
+pub mod vault_server;
