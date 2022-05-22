@@ -15,12 +15,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time;
 
-// The main thing FS needs to do is to bend fuse api calls into vault
-// api. For example, because we don't have permission, FS should just
-// ignore any permission argument passed through FUSE api. It should
-// also store a file descriptor to file path map, because FUSE expects
-// to refer to files by file descriptors. It also needs to convert
-// between types used by FUSE api and Vault api.
+// The fuse layer does mainly two things: it translates between the
+// globar "outer" inodes and the vault-local "inner" inodes. And it
+// remembers which file (inode) belongs to which vault and delegates
+// requests to the correct vault.
+//
+// The mapping between global and local inode is necessary because
+// each vault doesn't know or care about other vaults' inodes, they
+// just start from 1 and goes up. To avoid inevitable inode conflict
+// between vaults when we put them all under a single file system, we
+// chop u64 into a prefix and the actual inode. The first 16 bits are
+// the prefix (so we support up to 2^16 vaults), and the last 48 bits
+// are for inodes (so each vault can have up to 2^48 files). And for
+// each inode in a vault, we translate it into the global inode by
+// slapping the vault's prefix onto it.
 pub struct FS {
     /// The order of the vaults in this vector cannot change for the
     /// duration of running.
