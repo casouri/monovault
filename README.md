@@ -46,9 +46,8 @@ RUST_LOG="warn,monovault::fuse=info" cargo run -- -c /path/to/config.json
 
 This should log all the calls made by FUSE.
 
-To stop the file system, just hit Ctrl-C. But you need to manually
-unmount the filesystem lest the next time you try to mount it there
-will be an error. To unmount (on mac):
+To stop the file system, just manually unmount the filesystem. To
+unmount (on mac):
 
 ```shell
 umount -f /path/to/mount/point
