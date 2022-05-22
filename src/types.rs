@@ -33,18 +33,26 @@ pub struct DirEntry {
 }
 
 #[derive(Debug)]
+pub struct FileInfo {
+    pub inode: Inode,
+    pub name: String,
+    pub kind: VaultFileType,
+    pub size: u64,
+}
+
+#[derive(Debug)]
 pub enum VaultError {
+    FileNameTooLong(String),
     NoCorrespondingVault(Inode),
-    U64Overflow(String),
-    U64Underflow(String),
-    FileNotExist(String),
-    InvalidAction(String),
+    U64Overflow(u64),
+    U64Underflow(u64),
+    FileNotExist(Inode),
     NotDirectory(String),
-    DeleteNonEmptyDirectory(String),
-    NoWriteAccess(String),
+    IsDirectory(Inode),
+    DirectoryNotEmpty(Inode),
     NetworkError(Box<dyn std::error::Error>),
     Unknown(Box<dyn std::error::Error>),
-    WriteConflict(String, u64, u64),
+    WriteConflict(Inode, u64, u64),
     SqliteError(rusqlite::Error),
     MarshallError(serde_json::Error),
     IOError(std::io::Error),
@@ -72,7 +80,7 @@ impl From<std::io::Error> for VaultError {
 pub trait Vault {
     /// Return the name of the vault.
     fn name(&self) -> String;
-    fn attr(&self, file: Inode) -> VaultResult<DirEntry>;
+    fn attr(&self, file: Inode) -> VaultResult<FileInfo>;
     /// Read `file` from `offset`, reads `size` bytes. If there aren't
     /// enough bytes to read, read to EOF.
     fn read(&self, file: Inode, offset: i64, size: u32) -> VaultResult<Vec<u8>>;
@@ -81,12 +89,13 @@ pub trait Vault {
     /// Create a file or directory under `parent` with `name` and open
     /// it. Return its inode.
     fn create(&self, parent: Inode, name: &str, kind: VaultFileType) -> VaultResult<Inode>;
-    /// Open `file`.
+    /// Open `file`. `mod` is currently unused. `file` should be a regular file.
     fn open(&self, file: Inode, mode: &mut OpenOptions) -> VaultResult<()>;
-    /// Close `file`.
+    /// Close `file`. `file` should be a regular file.
     fn close(&self, file: Inode) -> VaultResult<()>;
-    /// Delete `file`.
+    /// Delete `file`. `file` can a regular file or a directory.
     fn delete(&self, file: Inode) -> VaultResult<()>;
-    /// Read each entry in `dir`, and return them.
+    /// List directory entries of `dir`. The listing includes "." and
+    /// "..", but if `dir` is vault root, ".." is not included.
     fn readdir(&self, dir: Inode) -> VaultResult<Vec<DirEntry>>;
 }

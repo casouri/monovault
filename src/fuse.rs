@@ -22,7 +22,6 @@ use std::time;
 // to refer to files by file descriptors. It also needs to convert
 // between types used by FUSE api and Vault api.
 pub struct FS {
-    config: Config,
     /// The order of the vaults in this vector cannot change for the
     /// duration of running.
     vaults: Vec<Arc<Box<dyn Vault>>>,
@@ -37,15 +36,15 @@ fn ts() -> time::SystemTime {
     time::SystemTime::UNIX_EPOCH
 }
 
-/// TTL tells how long the result should be kept in cache. Return a 0 TTL.
+/// TTL tells how long the result should be kept in cache. Return a 30s TTL.
 fn ttl() -> time::Duration {
-    time::Duration::new(0, 0)
+    time::Duration::new(30, 0)
 }
 
-fn attr(ino: Inode, kind: FileType) -> FileAttr {
+fn attr(ino: Inode, kind: FileType, size: u64) -> FileAttr {
     FileAttr {
         ino,
-        size: 1,
+        size,
         blocks: 1,
         // Last access.
         atime: ts(),
@@ -57,7 +56,7 @@ fn attr(ino: Inode, kind: FileType) -> FileAttr {
         crtime: ts(),
         blksize: 1,
         kind,
-        perm: 0o755,
+        perm: 0o777,
         // Number of hard links.
         nlink: 1,
         uid: 1,
@@ -76,8 +75,20 @@ fn translate_kind(kind: VaultFileType) -> FileType {
     }
 }
 
+fn translate_error(err: VaultError) -> libc::c_int {
+    match err {
+        VaultError::FileNameTooLong(_) => libc::ENAMETOOLONG,
+        VaultError::NoCorrespondingVault(_) => libc::ENOENT,
+        VaultError::FileNotExist(_) => libc::ENOENT,
+        VaultError::NotDirectory(_) => libc::ENOTDIR,
+        VaultError::IsDirectory(_) => libc::EISDIR,
+        VaultError::DirectoryNotEmpty(_) => libc::ENOTEMPTY,
+        _ => libc::EIO,
+    }
+}
+
 impl FS {
-    pub fn new(config: Config, vaults: Vec<Box<dyn Vault>>) -> FS {
+    pub fn new(vaults: Vec<Box<dyn Vault>>) -> FS {
         let mut vault_map = HashMap::new();
         let mut vault_base_map = HashMap::new();
         let mut vault_refs = vec![];
@@ -91,7 +102,6 @@ impl FS {
             base += 1;
         }
         FS {
-            config,
             vaults: vault_refs,
             vault_map,
             vault_base_map,
@@ -114,7 +124,7 @@ impl FS {
             let root_inode = self.to_outer(vault, 1);
             result.push((root_inode, vault.name(), FileType::Directory));
         }
-        info!("readdir_vaults: {:?}", &result);
+        debug!("readdir_vaults: {:?}", &result);
         result
     }
 
@@ -126,16 +136,24 @@ impl FS {
         }
     }
 
-    fn getattr_1(&mut self, _req: &Request, _ino: u64) -> VaultResult<DirEntry> {
+    fn getattr_1(&mut self, _req: &Request, _ino: u64) -> VaultResult<FileInfo> {
         if _ino == 1 {
-            Ok(DirEntry {
+            Ok(FileInfo {
                 inode: 1,                       // -> This is not used.
                 name: "/".to_string(),          // -> This is not used.
                 kind: VaultFileType::Directory, // -> This is used.
+                size: 1,                        // -> This is used.
             })
         } else {
             let vault = self.get_vault(_ino)?;
-            vault.attr(self.to_inner(&vault, _ino))
+            let info = vault.attr(self.to_inner(&vault, _ino))?;
+            Ok(FileInfo {
+                // This is not used but we should do TRT.
+                inode: self.to_outer(&vault, info.inode),
+                name: info.name, // This is not used
+                kind: info.kind, // This is used.
+                size: info.size, // This is used.
+            })
         }
     }
 
@@ -221,11 +239,14 @@ impl FS {
         umask: u32,
     ) -> VaultResult<Inode> {
         let vault = self.get_vault(parent)?;
-        vault.create(
+        let inode = vault.create(
             self.to_inner(&vault, parent),
             &name.to_string_lossy().into_owned(),
             VaultFileType::Directory,
-        )
+        )?;
+        let outer_inode = self.to_outer(&vault, inode);
+        self.vault_map.insert(outer_inode, Arc::clone(&vault));
+        Ok(outer_inode)
     }
 
     fn readdir_1(
@@ -241,15 +262,19 @@ impl FS {
         }
         let vault = self.get_vault(ino)?;
         let entries = vault.readdir(self.to_inner(&vault, ino))?;
-        info!("readdir entries from vault={:?}", entries);
+        // Translate DirEntry to the tuple we return.
         let mut entries: Vec<(u64, String, FileType)> = entries
             .iter()
             .map(|entry| {
-                (
-                    self.to_outer(&vault, entry.inode),
-                    entry.name.clone(),
-                    translate_kind(entry.kind),
-                )
+                // Remember the mapping from each entry to its vault.
+                // When fuse starts up, it only has mappings for vault
+                // roots, so any newly discovered files need to be
+                // added to the map.
+                let outer_inode = self.to_outer(&vault, entry.inode);
+                if outer_inode != 1 {
+                    self.vault_map.insert(outer_inode, Arc::clone(&vault));
+                }
+                (outer_inode, entry.name.clone(), translate_kind(entry.kind))
             })
             .collect();
         // If the directory is vault root, we need to add parent dir
@@ -257,7 +282,6 @@ impl FS {
         if self.to_inner(&vault, ino) == 1 {
             entries.push((1, "..".to_string(), FileType::Directory))
         }
-        info!("readdir final entries={:?}", entries);
         Ok(entries)
     }
 }
@@ -277,14 +301,16 @@ impl Filesystem for FS {
 
     fn lookup(&mut self, _req: &Request, _parent: u64, _name: &std::ffi::OsStr, reply: ReplyEntry) {
         let name = _name.to_string_lossy().into_owned();
-        info!("lookup(parent={}, name={})", _parent, &name);
-
+        debug!("lookup(parent={}, name={})", _parent, &name);
         match self.readdir_1(_req, _parent, 0, 0) {
             Ok(entries) => {
+                // Find the child with NAME and return information of it.
                 for (inode, fname, kind) in entries {
                     if fname == name {
-                        info!("reply.entry: (inode={}, kind={:?})", inode, kind);
-                        reply.entry(&ttl(), &attr(inode, kind), 0);
+                        debug!("lookup => (inode={}, kind={:?})", inode, kind);
+                        // Lookup is only used for directories so the
+                        // size can be just 1.
+                        reply.entry(&ttl(), &attr(inode, kind, 1), 0);
                         return;
                     }
                 }
@@ -293,25 +319,26 @@ impl Filesystem for FS {
             }
             Err(err) => {
                 error!("{:?}", err);
-                reply.error(EIO);
+                reply.error(translate_error(err));
             }
         }
     }
 
     fn getattr(&mut self, _req: &Request, _ino: u64, reply: ReplyAttr) {
-        info!("getattr(ino={})", _ino);
         match self.getattr_1(_req, _ino) {
             Ok(entry) => {
-                info!(
-                    "reply.attr(ino={}, kind={:?})",
+                debug!(
+                    "getattr({}) => (ino={}, kind={:?}, size={})",
                     _ino,
-                    translate_kind(entry.kind)
+                    _ino,
+                    translate_kind(entry.kind),
+                    entry.size
                 );
-                reply.attr(&ttl(), &attr(_ino, translate_kind(entry.kind)))
+                reply.attr(&ttl(), &attr(_ino, translate_kind(entry.kind), entry.size))
             }
             Err(err) => {
                 error!("{:?}", err);
-                reply.error(EIO)
+                reply.error(translate_error(err))
             }
         }
     }
@@ -326,12 +353,19 @@ impl Filesystem for FS {
         flags: i32,
         reply: ReplyCreate,
     ) {
-        info!("create(parent={}, name={})", parent, name.to_string_lossy());
         match self.create_1(_req, parent, name, mode, umask, flags) {
-            Ok(inode) => reply.created(&ttl(), &attr(inode, FileType::RegularFile), 0, 0, 0),
+            Ok(inode) => {
+                info!(
+                    "create(parent={}, name={}) => {}",
+                    parent,
+                    name.to_string_lossy(),
+                    inode
+                );
+                reply.created(&ttl(), &attr(inode, FileType::RegularFile, 0), 0, 0, 0)
+            }
             Err(err) => {
                 error!("{:?}", err);
-                reply.error(EIO)
+                reply.error(translate_error(err))
             }
         }
     }
@@ -342,7 +376,7 @@ impl Filesystem for FS {
             Ok(_) => reply.opened(0, 0),
             Err(err) => {
                 error!("{:?}", err);
-                reply.error(EIO)
+                reply.error(translate_error(err))
             }
         }
     }
@@ -362,7 +396,7 @@ impl Filesystem for FS {
             Ok(_) => reply.ok(),
             Err(err) => {
                 error!("{:?}", err);
-                reply.error(EIO)
+                reply.error(translate_error(err))
             }
         }
     }
@@ -378,12 +412,12 @@ impl Filesystem for FS {
         lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        info!("read(ino={})", ino);
+        info!("read(ino={}, offset={}, size={})", ino, offset, size);
         match self.read_1(_req, ino, fh, offset, size, flags, lock_owner) {
             Ok(data) => reply.data(&data),
             Err(err) => {
                 error!("{:?}", err);
-                reply.error(EIO)
+                reply.error(translate_error(err))
             }
         }
     }
@@ -400,12 +434,12 @@ impl Filesystem for FS {
         lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        info!("write(ino={})", ino);
+        info!("write(ino={}, offset={})", ino, offset);
         match self.write_1(_req, ino, fh, offset, data, write_flags, flags, lock_owner) {
             Ok(size) => reply.written(size),
             Err(err) => {
                 error!("{:?}", err);
-                reply.error(EIO)
+                reply.error(translate_error(err))
             }
         }
     }
@@ -446,12 +480,19 @@ impl Filesystem for FS {
         umask: u32,
         reply: ReplyEntry,
     ) {
-        info!("mkdir(parent={}, name={})", parent, name.to_string_lossy());
         match self.mkdir_1(_req, parent, name, mode, umask) {
-            Ok(inode) => reply.entry(&ttl(), &attr(inode, FileType::Directory), 0),
+            Ok(inode) => {
+                info!(
+                    "mkdir(parent={}, name={}) => {}",
+                    parent,
+                    name.to_string_lossy(),
+                    inode
+                );
+                reply.entry(&ttl(), &attr(inode, FileType::Directory, 1), 0)
+            }
             Err(err) => {
                 error!("{:?}", err);
-                reply.error(EIO)
+                reply.error(translate_error(err))
             }
         }
     }
@@ -464,13 +505,16 @@ impl Filesystem for FS {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        info!("readdir(ino={}, offset={})", ino, offset);
         match self.readdir_1(_req, ino, fh, offset) {
             Ok(inode_list) => {
+                info!(
+                    "readdir(ino={}, offset={}) => {:?}",
+                    ino, offset, inode_list
+                );
                 if (offset as usize) < inode_list.len() {
                     for idx in (offset as usize)..inode_list.len() {
                         let (inode, name, ty) = inode_list[idx].clone();
-                        info!(
+                        debug!(
                             "reply.add(inode={}, offset={}, name={})",
                             inode,
                             idx + 1,
@@ -485,14 +529,14 @@ impl Filesystem for FS {
                     reply.ok();
                 } else {
                     // Offset too large, no more entries.
-                    info!("readdir: return empty");
+                    debug!("readdir: return empty");
                     reply.ok();
                     // reply.error(ENOENT);
                 }
             }
             Err(err) => {
                 error!("{:?}", err);
-                reply.error(EIO)
+                reply.error(translate_error(err))
             }
         }
     }

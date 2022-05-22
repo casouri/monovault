@@ -34,11 +34,11 @@ fn main() {
     }
 
     let database = Arc::new(Mutex::new(
-        Database::new(&db_path.join("store.sqlite3")).expect("Cannot create database"),
+        Database::new(&db_path).expect("Cannot create database"),
     ));
     let local_vault = LocalVault::new(&config.local_vault_name, Arc::clone(&database))
         .expect("Cannot create local vault instance");
 
-    let fs = FS::new(config.clone(), vec![Box::new(local_vault)]);
+    let fs = FS::new(vec![Box::new(local_vault)]);
     fuser::mount2(fs, &config.mount_point, &[]).unwrap();
 }
