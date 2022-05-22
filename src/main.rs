@@ -1,11 +1,13 @@
 use clap::{Arg, Command};
-use fuse;
+use fuser;
 use monovault::{database::Database, fuse::FS, local_vault::LocalVault, types::*};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 fn main() {
+    env_logger::init();
+
     let matches = Command::new("monovault")
         .version("0.1.0")
         .about("Distributed network FS")
@@ -26,17 +28,17 @@ fn main() {
         panic!("Mount point doesn't exist");
     }
 
-    let db_path = mount_point.join("db");
+    let db_path = Path::new(&config.db_path);
     if !db_path.exists() {
         fs::create_dir(&db_path).expect("Cannot create directory for database");
     }
 
     let database = Arc::new(Mutex::new(
-        Database::new(&db_path).expect("Cannot create database"),
+        Database::new(&db_path.join("store.sqlite3")).expect("Cannot create database"),
     ));
     let local_vault = LocalVault::new(&config.local_vault_name, Arc::clone(&database))
         .expect("Cannot create local vault instance");
 
     let fs = FS::new(config.clone(), vec![Box::new(local_vault)]);
-    fuse::mount(fs, &config.mount_point, &[]).unwrap();
+    fuser::mount2(fs, &config.mount_point, &[]).unwrap();
 }

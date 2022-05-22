@@ -1,4 +1,5 @@
 use crate::types::*;
+use log::{debug, info};
 use rusqlite::params;
 use rusqlite::OptionalExtension;
 use serde::{de::DeserializeOwned, Serialize};
@@ -20,14 +21,13 @@ use std::path::{Path, PathBuf};
 /// Database provides object storage and key-value storage.
 #[derive(Debug)]
 pub struct Database {
-    root: PathBuf,
     hasher: DefaultHasher,
     db: rusqlite::Connection,
+    db_path: PathBuf,
 }
 
 impl Database {
-    pub fn new(root: &Path) -> VaultResult<Database> {
-        let db_path = root.join("store.sqlite3");
+    pub fn new(db_path: &Path) -> VaultResult<Database> {
         let connection = rusqlite::Connection::open(&db_path)?;
         connection.execute(
             "create table if not exists HasChild (
@@ -42,38 +42,56 @@ primary key (parent, child)
 file int,
 name char(100),
 type int,
-primary key (dir)
-);",
-            [],
-        )?;
-        connection.execute(
-            "create table if not exists Inode (
-only int
-inode int
-primary key (only)
+primary key (file)
 );",
             [],
         )?;
         Ok(Database {
-            root: root.to_path_buf(),
             hasher: DefaultHasher::new(),
             db: connection,
+            db_path: db_path.to_path_buf(),
         })
     }
 
     pub fn path(&self) -> PathBuf {
-        self.root.clone()
+        self.db_path.clone()
     }
 
     pub fn largest_inode(&mut self) -> Inode {
         match self
             .db
             .query_row("select inode from Type order by inode desc", [], |row| {
-                Ok(row.get(0)?)
+                Ok(row.get_unwrap(0))
             }) {
             Ok(inode) => inode,
-            _ => 1024,
+            _ => 1,
         }
+    }
+
+    pub fn attr(&mut self, file: Inode) -> VaultResult<DirEntry> {
+        if file == 1 {
+            return Ok(DirEntry {
+                inode: 1,
+                name: "/".to_string(),
+                kind: VaultFileType::Directory,
+            });
+        }
+        let entry =
+            self.db
+                .query_row("select name, type from Type where file=?", [file], |row| {
+                    Ok(DirEntry {
+                        inode: file,
+                        name: row.get_unwrap(0),
+                        kind: {
+                            if row.get_unwrap::<_, i32>(1) == 0 {
+                                VaultFileType::File
+                            } else {
+                                VaultFileType::Directory
+                            }
+                        },
+                    })
+                })?;
+        Ok(entry)
     }
 
     /// We don' check for duplicate, etc for now.
@@ -106,7 +124,7 @@ primary key (only)
         let parent = self.db.query_row(
             "select parent from HasChild where child=?",
             [child],
-            |row| Ok(row.get(0)?),
+            |row| Ok(row.get_unwrap(0)),
         )?;
         let transaction = self.db.transaction()?;
         transaction.execute(
@@ -119,31 +137,44 @@ primary key (only)
     }
 
     pub fn readdir(&mut self, file: Inode) -> VaultResult<Vec<DirEntry>> {
-        let mut statment = self
-            .db
-            .prepare("select child from HasChild where parent=?")?;
-        let children = statment.query_map([file], |row| Ok(row.get(0)?))?;
         let mut result = vec![];
-        for child in children {
-            let child: u64 = child.unwrap();
-            let entry =
+        result.push(DirEntry {
+            inode: file,
+            name: ".".to_string(),
+            kind: VaultFileType::Directory,
+        });
+
+        // If this is the root of this vault, we let fuse to add
+        // parent directory.
+        if file != 1 {
+            let parent =
                 self.db
-                    .query_row("select name, type from Type where file=?", [child], |row| {
-                        Ok(DirEntry {
-                            inode: child,
-                            name: row.get(0).unwrap(),
-                            kind: match row.get::<_, i32>(1) {
-                                Ok(ty) => {
-                                    if ty == 0 {
-                                        Ok(VaultFileType::File)
-                                    } else {
-                                        Ok(VaultFileType::Directory)
-                                    }
-                                }
-                                Err(err) => Err(err),
-                            }?,
-                        })
+                    .query_row("select parent from HasChild where child=?", [file], |row| {
+                        Ok(row.get_unwrap(0))
                     })?;
+            result.push(DirEntry {
+                inode: parent,
+                name: "..".to_string(),
+                kind: VaultFileType::Directory,
+            });
+        }
+
+        let children = {
+            let mut statment = self
+                .db
+                .prepare("select child from HasChild where parent=?")?;
+            let mut rows = statment.query([file])?;
+            let mut children = vec![];
+            while let Some(row) = rows.next()? {
+                children.push(row.get_unwrap(0));
+            }
+            children
+        };
+        info!("readdir children={:?}", children);
+        // Self.attr accesses database too, so it can't be interleaved
+        // with quering.
+        for child in children {
+            let entry = self.attr(child)?;
             result.push(entry);
         }
         Ok(result)

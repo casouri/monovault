@@ -2,6 +2,7 @@
 
 use crate::database::Database;
 use crate::types::*;
+use log::info;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -130,7 +131,13 @@ impl Vault for LocalVault {
         self.name.clone()
     }
 
+    fn attr(&self, file: Inode) -> VaultResult<DirEntry> {
+        info!("attr(file={})", file);
+        self.database.lock().unwrap().attr(file)
+    }
+
     fn read(&self, file: Inode, offset: i64, size: u32) -> VaultResult<Vec<u8>> {
+        info!("read(file={}, offset={}, size={})", file, offset, size);
         let lck = self.get_file(file)?;
         let mut file = lck.lock().unwrap();
         let mut buf = vec![0; size as usize];
@@ -149,12 +156,14 @@ impl Vault for LocalVault {
     }
 
     fn write(&self, file: Inode, offset: i64, data: &[u8]) -> VaultResult<u32> {
+        info!("write(file={}, offset={})", file, offset);
         let lck = self.get_file(file)?;
         let mut file = lck.lock().unwrap();
         Ok(file.write(data)? as u32)
     }
 
     fn create(&self, parent: Inode, name: &str, kind: VaultFileType) -> VaultResult<Inode> {
+        info!("create(parent={}, name={}, kind={:?})", parent, name, kind);
         let inode = self.new_inode();
         self.database
             .lock()
@@ -165,12 +174,14 @@ impl Vault for LocalVault {
     }
 
     fn open(&self, file: Inode, mode: &mut OpenOptions) -> VaultResult<()> {
+        info!("open(file={})", file);
         self.check_exists(file)?;
         self.incf_ref_count(file)?;
         Ok(())
     }
 
     fn close(&self, file: Inode) -> VaultResult<()> {
+        info!("close(file={})", file);
         let _ = self.get_file(file)?;
         let count = self.decf_ref_count(file)?;
         if count == 0 {
@@ -181,6 +192,7 @@ impl Vault for LocalVault {
     }
 
     fn delete(&self, file: Inode) -> VaultResult<()> {
+        info!("delete(file={})", file);
         self.database.lock().unwrap().remove_file(file)?;
         if self.ref_count(file) == 0 {
             std::fs::remove_file(self.compose_path(file))?;
@@ -189,6 +201,7 @@ impl Vault for LocalVault {
     }
 
     fn readdir(&self, dir: Inode) -> VaultResult<Vec<DirEntry>> {
+        info!("readdir(dir={})", dir);
         self.database.lock().unwrap().readdir(dir)
     }
 }

@@ -1,4 +1,3 @@
-use fuse::FileType;
 use serde::{Deserialize, Serialize};
 use std::boxed::Box;
 use std::collections::HashMap;
@@ -16,15 +15,17 @@ pub struct Config {
     pub my_address: VaultAddress,
     pub peers: HashMap<VaultName, VaultAddress>,
     pub mount_point: String,
+    pub db_path: String,
     pub local_vault_name: VaultName,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 pub enum VaultFileType {
     File,
     Directory,
 }
 
+#[derive(Debug)]
 pub struct DirEntry {
     pub inode: Inode,
     pub name: String,
@@ -33,6 +34,7 @@ pub struct DirEntry {
 
 #[derive(Debug)]
 pub enum VaultError {
+    NoCorrespondingVault(Inode),
     U64Overflow(String),
     U64Underflow(String),
     FileNotExist(String),
@@ -70,6 +72,7 @@ impl From<std::io::Error> for VaultError {
 pub trait Vault {
     /// Return the name of the vault.
     fn name(&self) -> String;
+    fn attr(&self, file: Inode) -> VaultResult<DirEntry>;
     /// Read `file` from `offset`, reads `size` bytes. If there aren't
     /// enough bytes to read, read to EOF.
     fn read(&self, file: Inode, offset: i64, size: u32) -> VaultResult<Vec<u8>>;
