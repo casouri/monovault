@@ -1,3 +1,4 @@
+pub mod caching_remote;
 pub mod database;
 pub mod fuse;
 pub mod local_vault;

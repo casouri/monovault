@@ -20,13 +20,13 @@ use std::time;
 //
 // The mapping between global and local inode is necessary because
 // each vault doesn't know or care about other vaults' inodes, they
-// just start from 1 and goes up. To avoid the inevitable inode
-// conflict between vaults when we put them all under a single file
-// system, we chop u64 into a prefix and the actual inode. The first
-// 16 bits are the prefix (so we support up to 2^16 vaults), and the
-// last 48 bits are for inodes (so each vault can have up to 2^48
-// files). And for each inode in a vault, we translate it into the
-// global inode by slapping the vault's prefix onto it.
+// just start from 1 and go up. To avoid inode conflict between vaults
+// when we put them all under a single file system, we chop u64 into a
+// prefix and the actual inode. The first 16 bits are the prefix (so
+// we support up to 2^16 vaults), and the last 48 bits are for inodes
+// (so each vault can have up to 2^48 files). And for each inode in a
+// vault, we translate it into the global inode by slapping the
+// vault's prefix onto it.
 pub struct FS {
     /// The order of the vaults in this vector cannot change for the
     /// duration of running.
