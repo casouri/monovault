@@ -230,7 +230,7 @@ impl Vault for LocalVault {
         Ok(inode)
     }
 
-    fn open(&self, file: Inode, mode: &mut OpenOptions) -> VaultResult<()> {
+    fn open(&self, file: Inode, mode: OpenMode) -> VaultResult<()> {
         info!("open(file={})", file);
         self.check_is_regular_file(file)?;
         self.check_data_file_exists(file)?;

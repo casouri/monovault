@@ -39,6 +39,11 @@ pub struct FileInfo {
     pub size: u64,
 }
 
+pub enum OpenMode {
+    R,
+    RW,
+}
+
 #[derive(Debug)]
 pub enum VaultError {
     FileNameTooLong(String),
@@ -95,7 +100,7 @@ pub trait Vault {
     /// it. Return its inode.
     fn create(&self, parent: Inode, name: &str, kind: VaultFileType) -> VaultResult<Inode>;
     /// Open `file`. `mod` is currently unused. `file` should be a regular file.
-    fn open(&self, file: Inode, mode: &mut OpenOptions) -> VaultResult<()>;
+    fn open(&self, file: Inode, mode: OpenMode) -> VaultResult<()>;
     /// Close `file`. `file` should be a regular file.
     fn close(&self, file: Inode) -> VaultResult<()>;
     /// Delete `file`. `file` can a regular file or a directory.

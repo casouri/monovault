@@ -2,22 +2,23 @@ syntax = "proto3";
 
 package rpc;
 
+enum VaultFileType {
+  File = 0;
+  Directory = 1;
+}
+
 message Empty {
 }
 
-message Uint32 {
+message Size {
   uint32 value = 1;
 }
 
-message Uint64 {
+message Inode {
   uint64 value = 1;
 }
 
 message FileInfo {
-  enum VaultFileType {
-    File = 0;
-    Directory = 1;
-  }
   uint64 inode = 1;
   string name = 2;
   VaultFileType kind = 3;
@@ -25,10 +26,6 @@ message FileInfo {
 }
 
 message DirEntry {
-  enum VaultFileType {
-    File = 0;
-    Directory = 1;
-  }
   uint64 inode = 1;
   string name = 2;
   VaultFileType kind = 3;
@@ -38,46 +35,46 @@ message DirEntryList {
   repeated DirEntry list = 1;
 }
 
-message Data{
-  repeated string list = 1;
-}
-
-message String {
-  string value = 1;
-}
-
 message FileToRead {
-  Uint64 name = 1;
+  uint64 name = 1;
   int64 offset = 2;
   uint32 size = 3;
 }
 
 message FileToWrite {
-  Uint64 name = 1;
+  uint64 name = 1;
   int64 offset = 2;
-  Data data = 3;
+  bytes data = 3;
 }
 
 
 message FileToCreate {
-  enum VaultFileType {
-    File = 0;
-    Directory = 1;
-  }
-  Uint64 parent = 1;
+  uint64 parent = 1;
   string name = 2;
   VaultFileType kind = 3;
 }
 
-service VultService {
-  rpc name(Empty) returns (String); 
-  rpc attr(Uint64) returns (FileInfo);
-  rpc read(FileToRead) returns (Data);  // StringList to represent u8List???
-  rpc write(FileToWrite) returns (Uint32);  // Data for vec<u8> or &[u8]???
-  rpc create(FileToCreate) returns (Uint64);
-  // rpc open(uint64, mode: &mut OpenOptions) returns (Empty); // OpenOptions
-  rpc close(Uint64) returns (Empty);
-  rpc delete(Uint64) returns (Empty);
-  rpc readdir(Uint64) returns (DirEntryList);
+message FileToOpen {
+  enum OpenMode {
+    R = 0;
+    RW = 1;
+  }
+  uint64 file = 1;
+  OpenMode mode = 2;
+}
+
+message DataChunk {
+  bytes payload = 1;
+}
+
+service VaultRPC {
+  rpc attr(Inode) returns (FileInfo);
+  rpc read(FileToRead) returns (stream DataChunk);
+  rpc write(stream FileToWrite) returns (Size);
+  rpc create(FileToCreate) returns (Inode);
+  rpc open(FileToOpen) returns (Empty);
+  rpc close(Inode) returns (Empty);
+  rpc delete(Inode) returns (Empty);
+  rpc readdir(Inode) returns (DirEntryList);
 }
 

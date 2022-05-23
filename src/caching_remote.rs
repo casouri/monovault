@@ -21,7 +21,7 @@ impl Vault for CachingVault {
         todo!()
     }
 
-    fn open(&self, file: Inode, mode: &mut std::fs::OpenOptions) -> VaultResult<()> {
+    fn open(&self, file: Inode, mode: OpenMode) -> VaultResult<()> {
         todo!()
     }
 

@@ -9,7 +9,6 @@ use log::{debug, error, info, warn};
 use std::boxed::Box;
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::fs::OpenOptions;
 use std::sync::Arc;
 use std::time;
 
@@ -203,7 +202,8 @@ impl FS {
 
     fn open_1(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32) -> VaultResult<()> {
         let vault = self.get_vault(_ino)?;
-        vault.open(self.to_inner(&vault, _ino), &mut OpenOptions::new())
+        // TODO: open mode.
+        vault.open(self.to_inner(&vault, _ino), OpenMode::RW)
     }
 
     fn release_1(

@@ -2,6 +2,8 @@
 // actual work.
 
 use crate::local_vault::LocalVault;
+use crate::rpc;
+use crate::rpc::vault_rpc_server::VaultRpc;
 use crate::types::*;
 
 struct VaultServer {

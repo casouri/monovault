@@ -1,6 +1,8 @@
 // Basically a gRPC client that makes requests to remote vault servers.
 
 use crate::database::Database;
+use crate::rpc;
+use crate::rpc::vault_rpc_client::VaultRpcClient;
 use crate::types::*;
 use std::fs::OpenOptions;
 use std::path::Path;
@@ -12,13 +14,31 @@ pub struct RemoteVault {
 }
 
 impl Vault for RemoteVault {
-    fn name(&self) -> String { todo!() } 
-    fn attr(&self, file: Inode) -> VaultResult<FileInfo> { todo!() } 
-    fn read(&self, file: Inode, offset: i64, size: u32) -> VaultResult<Vec<u8>> { todo!() }
-    fn write(&self, file: Inode, offset: i64, data: &[u8]) -> VaultResult<u32> { todo!() }
-    fn create(&self, parent: Inode, name: &str, kind: VaultFileType) -> VaultResult<Inode> { todo!() }
-    fn open(&self, file: Inode, mode: &mut OpenOptions) -> VaultResult<()> { todo!() }
-    fn close(&self, file: Inode) -> VaultResult<()> { todo!() }
-    fn delete(&self, file: Inode) -> VaultResult<()> { todo!() }
-    fn readdir(&self, dir: Inode) -> VaultResult<Vec<DirEntry>> { todo!() }
+    fn name(&self) -> String {
+        todo!()
+    }
+    fn attr(&self, file: Inode) -> VaultResult<FileInfo> {
+        todo!()
+    }
+    fn read(&self, file: Inode, offset: i64, size: u32) -> VaultResult<Vec<u8>> {
+        todo!()
+    }
+    fn write(&self, file: Inode, offset: i64, data: &[u8]) -> VaultResult<u32> {
+        todo!()
+    }
+    fn create(&self, parent: Inode, name: &str, kind: VaultFileType) -> VaultResult<Inode> {
+        todo!()
+    }
+    fn open(&self, file: Inode, mode: OpenMode) -> VaultResult<()> {
+        todo!()
+    }
+    fn close(&self, file: Inode) -> VaultResult<()> {
+        todo!()
+    }
+    fn delete(&self, file: Inode) -> VaultResult<()> {
+        todo!()
+    }
+    fn readdir(&self, dir: Inode) -> VaultResult<Vec<DirEntry>> {
+        todo!()
+    }
 }
