@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::boxed::Box;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::path::Path;
 
 pub type VaultName = String;
 pub type VaultAddress = String;
@@ -47,7 +46,7 @@ pub enum VaultError {
     U64Overflow(u64),
     U64Underflow(u64),
     FileNotExist(Inode),
-    NotDirectory(String),
+    NotDirectory(Inode),
     IsDirectory(Inode),
     DirectoryNotEmpty(Inode),
     NetworkError(Box<dyn std::error::Error>),

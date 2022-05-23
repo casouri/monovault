@@ -5,13 +5,11 @@ use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, ReplyOpen, ReplyWrite, Request,
 };
-use libc::{EIO, ENOENT, ENOSYS};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use std::boxed::Box;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::OpenOptions;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time;
 
@@ -165,14 +163,30 @@ impl FS {
         }
     }
 
+    fn lookup_1(
+        &mut self,
+        _req: &Request,
+        _parent: u64,
+        _name: &std::ffi::OsStr,
+    ) -> VaultResult<FileInfo> {
+        let name = _name.to_string_lossy().into_owned();
+        let entries = self.readdir_1(_req, _parent, 0, 0)?;
+        for (inode, fname, _) in entries {
+            if fname == name {
+                return self.getattr_1(_req, inode);
+            }
+        }
+        Err(VaultError::FileNotExist(0))
+    }
+
     fn create_1(
         &mut self,
         _req: &Request<'_>,
         parent: u64,
         name: &OsStr,
-        mode: u32,
-        umask: u32,
-        flags: i32,
+        _mode: u32,
+        _umask: u32,
+        _flags: i32,
     ) -> VaultResult<u64> {
         let vault = self.get_vault(parent)?;
         let inode = self.to_outer(
@@ -209,11 +223,11 @@ impl FS {
         &mut self,
         _req: &Request<'_>,
         ino: u64,
-        fh: u64,
+        _fh: u64,
         offset: i64,
         size: u32,
-        flags: i32,
-        lock_owner: Option<u64>,
+        _flags: i32,
+        _lock_owner: Option<u64>,
     ) -> VaultResult<Vec<u8>> {
         let vault = self.get_vault(ino)?;
         vault.read(self.to_inner(&vault, ino), offset, size)
@@ -223,19 +237,57 @@ impl FS {
         &mut self,
         _req: &Request<'_>,
         ino: u64,
-        fh: u64,
+        _fh: u64,
         offset: i64,
         data: &[u8],
-        write_flags: u32,
-        flags: i32,
-        lock_owner: Option<u64>,
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
     ) -> VaultResult<u32> {
         let vault = self.get_vault(ino)?;
         vault.write(self.to_inner(&vault, ino), offset, data)
     }
 
-    fn unlink_1(&mut self, _req: &Request, _parent: u64, _name: &std::ffi::OsStr) {
-        todo!()
+    fn unlink_1(
+        &mut self,
+        _req: &Request,
+        _parent: u64,
+        _name: &std::ffi::OsStr,
+        req_kind: FileType,
+    ) -> VaultResult<()> {
+        let name = _name.to_string_lossy().into_owned();
+        match self.readdir_1(_req, _parent, 0, 0) {
+            Ok(entries) => {
+                // Find the child with NAME and return information of it.
+                for (inode, fname, kind) in entries {
+                    if fname == name {
+                        return match (req_kind, kind) {
+                            (FileType::RegularFile, FileType::Directory) => {
+                                Err(VaultError::IsDirectory(inode))
+                            }
+                            (FileType::Directory, FileType::RegularFile) => {
+                                Err(VaultError::NotDirectory(inode))
+                            }
+                            (FileType::RegularFile, FileType::RegularFile) => {
+                                // Actually do the work.
+                                let vault = self.get_vault(inode)?;
+                                vault.delete(self.to_inner(&vault, inode))
+                            }
+                            (FileType::Directory, FileType::Directory) => {
+                                // Actually do the work.
+                                let vault = self.get_vault(inode)?;
+                                vault.delete(self.to_inner(&vault, inode))
+                            }
+                            // Other types are impossible.
+                            _ => Ok(()),
+                        };
+                    }
+                }
+                // No entry with the requested name, return error.
+                return Err(VaultError::FileNotExist(0));
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn mkdir_1(
@@ -243,8 +295,8 @@ impl FS {
         _req: &Request<'_>,
         parent: u64,
         name: &OsStr,
-        mode: u32,
-        umask: u32,
+        _mode: u32,
+        _umask: u32,
     ) -> VaultResult<Inode> {
         let vault = self.get_vault(parent)?;
         let inode = vault.create(
@@ -261,8 +313,8 @@ impl FS {
         &mut self,
         _req: &Request<'_>,
         ino: u64,
-        fh: u64,
-        offset: i64,
+        _fh: u64,
+        _offset: i64,
     ) -> VaultResult<Vec<(u64, String, FileType)>> {
         // If inode = 1, it refers to the root dir, list vaults.
         if ino == 1 {
@@ -308,25 +360,22 @@ impl Filesystem for FS {
     }
 
     fn lookup(&mut self, _req: &Request, _parent: u64, _name: &std::ffi::OsStr, reply: ReplyEntry) {
-        let name = _name.to_string_lossy().into_owned();
-        debug!("lookup(parent={}, name={})", _parent, &name);
-        match self.readdir_1(_req, _parent, 0, 0) {
-            Ok(entries) => {
-                // Find the child with NAME and return information of it.
-                for (inode, fname, kind) in entries {
-                    if fname == name {
-                        debug!("lookup => (inode={}, kind={:?})", inode, kind);
-                        // Lookup is only used for directories so the
-                        // size can be just 1.
-                        reply.entry(&ttl(), &attr(inode, kind, 1), 0);
-                        return;
-                    }
-                }
-                // No entry with the requested name, return error.
-                reply.error(ENOENT);
-            }
+        debug!(
+            "lookup(parent={}, name={})",
+            _parent,
+            _name.to_string_lossy()
+        );
+        match self.lookup_1(_req, _parent, _name) {
+            Ok(info) => reply.entry(
+                &ttl(),
+                &attr(info.inode, translate_kind(info.kind), info.size),
+                0,
+            ),
             Err(err) => {
-                error!("{:?}", err);
+                // NOTE: If you see lookup warning on werid stuff like
+                // ._., ._xxx, etc, that's because of APFS, so just
+                // ignore them.
+                warn!("{:?}", err);
                 reply.error(translate_error(err));
             }
         }
@@ -452,14 +501,27 @@ impl Filesystem for FS {
         }
     }
 
-    fn flush(&mut self, _req: &Request<'_>, ino: u64, fh: u64, lock_owner: u64, reply: ReplyEmpty) {
+    fn flush(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        _lock_owner: u64,
+        reply: ReplyEmpty,
+    ) {
         info!("flush(ino={})", ino);
         reply.ok();
     }
 
     fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         info!("unlink(parent={}, name={})", parent, name.to_string_lossy());
-        todo!()
+        match self.unlink_1(_req, parent, name, FileType::RegularFile) {
+            Ok(_) => reply.ok(),
+            Err(err) => {
+                error!("{:?}", err);
+                reply.error(translate_error(err))
+            }
+        }
     }
 
     fn opendir(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
@@ -513,16 +575,13 @@ impl Filesystem for FS {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
+        info!("readdir(ino={}, offset={})", ino, offset);
         match self.readdir_1(_req, ino, fh, offset) {
             Ok(inode_list) => {
-                info!(
-                    "readdir(ino={}, offset={}) => {:?}",
-                    ino, offset, inode_list
-                );
                 if (offset as usize) < inode_list.len() {
                     for idx in (offset as usize)..inode_list.len() {
                         let (inode, name, ty) = inode_list[idx].clone();
-                        debug!(
+                        info!(
                             "reply.add(inode={}, offset={}, name={})",
                             inode,
                             idx + 1,
@@ -539,7 +598,6 @@ impl Filesystem for FS {
                     // Offset too large, no more entries.
                     debug!("readdir: return empty");
                     reply.ok();
-                    // reply.error(ENOENT);
                 }
             }
             Err(err) => {
@@ -551,6 +609,22 @@ impl Filesystem for FS {
 
     fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         info!("rmdir(parent={}, name={})", parent, name.to_string_lossy());
-        todo!()
+        if parent == 1 {
+            // See rmdir(2).
+            error!(
+                "rmdir(parent={}, name={}) => EBUSY",
+                parent,
+                name.to_string_lossy()
+            );
+            reply.error(libc::EBUSY);
+            return;
+        }
+        match self.unlink_1(_req, parent, name, FileType::Directory) {
+            Ok(_) => reply.ok(),
+            Err(err) => {
+                error!("{:?}", err);
+                reply.error(translate_error(err))
+            }
+        }
     }
 }

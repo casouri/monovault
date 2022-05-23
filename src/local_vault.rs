@@ -201,7 +201,12 @@ impl Vault for LocalVault {
         // In fuse semantics (and thus vault's) create also open the
         // file. We need to call get_file to ensure the data file is
         // created.
-        self.get_file(inode)?;
+        match kind {
+            VaultFileType::File => {
+                self.get_file(inode)?;
+            }
+            VaultFileType::Directory => (),
+        }
         // NOTE: Make sure we create data file before creating
         // metadata, to ensure consistency.
         self.database
@@ -235,11 +240,13 @@ impl Vault for LocalVault {
 
     fn delete(&self, file: Inode) -> VaultResult<()> {
         info!("delete(file={})", file);
+        // Prefetch kind and store it, because we won't be able to
+        // get it after deleting the file.
+        let kind = self.database.lock().unwrap().attr(file)?.kind;
         // Database will check for nonempty directory for us.
         self.database.lock().unwrap().remove_file(file)?;
         // NOTE: Make sure we remove metadata before removing data
         // file, to ensure consistency.
-        let kind = self.database.lock().unwrap().attr(file)?.kind;
         match kind {
             VaultFileType::File => {
                 self.check_data_file_exists(file)?;

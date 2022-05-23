@@ -134,8 +134,13 @@ primary key (file)
         match kind {
             VaultFileType::Directory => {
                 let grandchildren = self.readdir(child)?;
-                let nonempty = grandchildren.len() > 0;
-                if nonempty {
+                let mut empty = true;
+                for gchild in grandchildren {
+                    if gchild.name != "." && gchild.name != ".." {
+                        empty = false;
+                    }
+                }
+                if !empty {
                     return Err(VaultError::DirectoryNotEmpty(child));
                 }
             }
