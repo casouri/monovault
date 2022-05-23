@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time;
 
 // The fuse layer does mainly two things: it translates between the
-// globar "outer" inodes and the vault-local "inner" inodes. And it
+// global "outer" inodes and the vault-local "inner" inodes. And it
 // remembers which file (inode) belongs to which vault and delegates
 // requests to the correct vault.
 //
