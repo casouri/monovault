@@ -27,31 +27,34 @@ pub struct LocalVault {
     /// of that file reaches 0, the file handler can be closed, and
     /// the file can be deleted from disk (if requested).
     ref_count: Mutex<HashMap<Inode, u64>>,
-    /// The next allocated inode is next_inode + 1.
-    next_inode: AtomicU64,
+    /// The next allocated inode is current_inode + 1.
+    current_inode: AtomicU64,
+    /// Files waiting to be deleted.
+    pending_delete: Mutex<Vec<Inode>>,
 }
 
 impl LocalVault {
     /// `name` is the name of the vault, also the directory name of
     /// the vault root.
     pub fn new(name: &str, database: Arc<Mutex<Database>>) -> VaultResult<LocalVault> {
-        let next_inode = { database.lock().unwrap().largest_inode() };
-        info!("vault {} next_inode={}", name, next_inode);
+        let current_inode = { database.lock().unwrap().largest_inode() };
+        info!("vault {} next_inode={}", name, current_inode);
         Ok(LocalVault {
             name: name.to_string(),
             database,
             fd_map: Mutex::new(HashMap::new()),
             ref_count: Mutex::new(HashMap::new()),
-            next_inode: AtomicU64::new(next_inode),
+            current_inode: AtomicU64::new(current_inode),
+            pending_delete: Mutex::new(vec![]),
         })
     }
 
     /// Return a new inode.
     fn new_inode(&self) -> Inode {
-        self.next_inode
+        self.current_inode
             .fetch_update(SeqCst, SeqCst, |inode| Some(inode + 1))
             .unwrap();
-        self.next_inode.load(SeqCst)
+        self.current_inode.load(SeqCst)
     }
 
     /// Get the path to where the content of `file` is stored.
@@ -144,6 +147,15 @@ impl LocalVault {
 impl Vault for LocalVault {
     fn name(&self) -> String {
         self.name.clone()
+    }
+
+    fn tear_down(&self) -> VaultResult<()> {
+        info!("tear_down()");
+        let queue = self.pending_delete.lock().unwrap();
+        for &file in queue.iter() {
+            std::fs::remove_file(self.compose_path(file))?;
+        }
+        Ok(())
     }
 
     fn attr(&self, file: Inode) -> VaultResult<FileInfo> {
@@ -252,7 +264,13 @@ impl Vault for LocalVault {
                 self.check_data_file_exists(file)?;
                 if self.ref_count(file) == 0 {
                     std::fs::remove_file(self.compose_path(file))?;
-                    // TODO: delete all pending files on exit.
+                } else {
+                    // If there are other references to the file,
+                    // don't delete yet.
+                    let mut queue = self.pending_delete.lock().unwrap();
+                    if !queue.contains(&file) {
+                        queue.push(file)
+                    }
                 }
             }
             VaultFileType::Directory => (),

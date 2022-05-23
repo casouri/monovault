@@ -14,19 +14,19 @@ use std::sync::Arc;
 use std::time;
 
 // The fuse layer does mainly two things: it translates between the
-// globar "outer" inodes and the vault-local "inner" inodes. And it
+// global "outer" inodes and the vault-local "inner" inodes. And it
 // remembers which file (inode) belongs to which vault and delegates
 // requests to the correct vault.
 //
 // The mapping between global and local inode is necessary because
 // each vault doesn't know or care about other vaults' inodes, they
-// just start from 1 and goes up. To avoid inevitable inode conflict
-// between vaults when we put them all under a single file system, we
-// chop u64 into a prefix and the actual inode. The first 16 bits are
-// the prefix (so we support up to 2^16 vaults), and the last 48 bits
-// are for inodes (so each vault can have up to 2^48 files). And for
-// each inode in a vault, we translate it into the global inode by
-// slapping the vault's prefix onto it.
+// just start from 1 and goes up. To avoid the inevitable inode
+// conflict between vaults when we put them all under a single file
+// system, we chop u64 into a prefix and the actual inode. The first
+// 16 bits are the prefix (so we support up to 2^16 vaults), and the
+// last 48 bits are for inodes (so each vault can have up to 2^48
+// files). And for each inode in a vault, we translate it into the
+// global inode by slapping the vault's prefix onto it.
 pub struct FS {
     /// The order of the vaults in this vector cannot change for the
     /// duration of running.
@@ -352,11 +352,18 @@ impl Filesystem for FS {
         _req: &Request<'_>,
         _config: &mut fuser::KernelConfig,
     ) -> Result<(), libc::c_int> {
+        info!("init()");
         Ok(())
     }
 
     fn destroy(&mut self) {
-        ()
+        info!("destroy()");
+        for vault in &self.vaults {
+            match vault.tear_down() {
+                Ok(_) => (),
+                Err(err) => error!("destroy() => vault {} {:?}", vault.name(), err),
+            }
+        }
     }
 
     fn lookup(&mut self, _req: &Request, _parent: u64, _name: &std::ffi::OsStr, reply: ReplyEntry) {
@@ -660,7 +667,8 @@ impl Filesystem for FS {
     fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         info!("rmdir(parent={}, name={})", parent, name.to_string_lossy());
         if parent == 1 {
-            // See rmdir(2).
+            // We don't allow deleting root and vault directories
+            // (obviously). See rmdir(2) for detail on EBUSY.
             error!(
                 "rmdir(parent={}, name={}) => EBUSY",
                 parent,

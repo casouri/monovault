@@ -75,10 +75,16 @@ impl From<std::io::Error> for VaultError {
     }
 }
 
-/// Inodes start from 1024, 0-1023 are reserved for vaults.
+/// A generic vault, can be either a local vault or a remote vault.
 pub trait Vault {
     /// Return the name of the vault.
     fn name(&self) -> String;
+    fn setup(&self) -> VaultResult<()> {
+        Ok(())
+    }
+    fn tear_down(&self) -> VaultResult<()> {
+        Ok(())
+    }
     fn attr(&self, file: Inode) -> VaultResult<FileInfo>;
     /// Read `file` from `offset`, reads `size` bytes. If there aren't
     /// enough bytes to read, read to EOF.
