@@ -373,9 +373,15 @@ impl Filesystem for FS {
             ),
             Err(err) => {
                 // NOTE: If you see lookup warning on werid stuff like
-                // ._., ._xxx, etc, that's because of APFS, so just
-                // ignore them.
-                warn!("{:?}", err);
+                // ._., ._xxx, etc, they are turd files (Apple double
+                // files) like .DS_Store. See
+                // https://code.google.com/archive/p/macfuse/wikis/OPTIONS.wiki.
+                error!(
+                    "lookup(parent={}, name={}) => {:?}",
+                    _parent,
+                    _name.to_string_lossy(),
+                    err
+                );
                 reply.error(translate_error(err));
             }
         }
@@ -394,10 +400,35 @@ impl Filesystem for FS {
                 reply.attr(&ttl(), &attr(_ino, translate_kind(entry.kind), entry.size))
             }
             Err(err) => {
-                error!("{:?}", err);
+                error!("getattr({}) => {:?}", _ino, err);
                 reply.error(translate_error(err))
             }
         }
+    }
+
+    fn setattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        _atime: Option<fuser::TimeOrNow>,
+        _mtime: Option<fuser::TimeOrNow>,
+        _ctime: Option<time::SystemTime>,
+        fh: Option<u64>,
+        _crtime: Option<time::SystemTime>,
+        _chgtime: Option<time::SystemTime>,
+        _bkuptime: Option<time::SystemTime>,
+        flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        info!(
+            "setattr(ino={}, uid={:?}, gid={:?}, size={:?})",
+            ino, uid, gid, size
+        );
+        self.getattr(_req, ino, reply)
     }
 
     fn create(
@@ -421,7 +452,12 @@ impl Filesystem for FS {
                 reply.created(&ttl(), &attr(inode, FileType::RegularFile, 0), 0, 0, 0)
             }
             Err(err) => {
-                error!("{:?}", err);
+                error!(
+                    "create(parent={}, name={}) => {:?}",
+                    parent,
+                    name.to_string_lossy(),
+                    err
+                );
                 reply.error(translate_error(err))
             }
         }
@@ -432,7 +468,7 @@ impl Filesystem for FS {
         match self.open_1(_req, _ino, _flags) {
             Ok(_) => reply.opened(0, 0),
             Err(err) => {
-                error!("{:?}", err);
+                error!("open(ino={}) => {:?}", _ino, err);
                 reply.error(translate_error(err))
             }
         }
@@ -452,7 +488,7 @@ impl Filesystem for FS {
         match self.release_1(_req, _ino, _fh, _flags, _lock_owner, _flush) {
             Ok(_) => reply.ok(),
             Err(err) => {
-                error!("{:?}", err);
+                error!("release(ino={}) => {:?}", _ino, err);
                 reply.error(translate_error(err))
             }
         }
@@ -473,7 +509,10 @@ impl Filesystem for FS {
         match self.read_1(_req, ino, fh, offset, size, flags, lock_owner) {
             Ok(data) => reply.data(&data),
             Err(err) => {
-                error!("{:?}", err);
+                error!(
+                    "read(ino={}, offset={}, size={}) => {:?}",
+                    ino, offset, size, err
+                );
                 reply.error(translate_error(err))
             }
         }
@@ -495,7 +534,7 @@ impl Filesystem for FS {
         match self.write_1(_req, ino, fh, offset, data, write_flags, flags, lock_owner) {
             Ok(size) => reply.written(size),
             Err(err) => {
-                error!("{:?}", err);
+                error!("write(ino={}, offset={}) =? {:?}", ino, offset, err);
                 reply.error(translate_error(err))
             }
         }
@@ -518,7 +557,12 @@ impl Filesystem for FS {
         match self.unlink_1(_req, parent, name, FileType::RegularFile) {
             Ok(_) => reply.ok(),
             Err(err) => {
-                error!("{:?}", err);
+                error!(
+                    "unlink(parent={}, name={}) => {:?}",
+                    parent,
+                    name.to_string_lossy(),
+                    err
+                );
                 reply.error(translate_error(err))
             }
         }
@@ -550,6 +594,7 @@ impl Filesystem for FS {
         umask: u32,
         reply: ReplyEntry,
     ) {
+        info!("mkdir(parent={}, name={})", parent, name.to_string_lossy());
         match self.mkdir_1(_req, parent, name, mode, umask) {
             Ok(inode) => {
                 info!(
@@ -561,7 +606,12 @@ impl Filesystem for FS {
                 reply.entry(&ttl(), &attr(inode, FileType::Directory, 1), 0)
             }
             Err(err) => {
-                error!("{:?}", err);
+                error!(
+                    "mkdir(parent={}, name={}) => {:?}",
+                    parent,
+                    name.to_string_lossy(),
+                    err
+                );
                 reply.error(translate_error(err))
             }
         }
@@ -601,7 +651,7 @@ impl Filesystem for FS {
                 }
             }
             Err(err) => {
-                error!("{:?}", err);
+                error!("readdir(ino={}, offset={}) => {:?}", ino, offset, err);
                 reply.error(translate_error(err))
             }
         }
@@ -622,7 +672,12 @@ impl Filesystem for FS {
         match self.unlink_1(_req, parent, name, FileType::Directory) {
             Ok(_) => reply.ok(),
             Err(err) => {
-                error!("{:?}", err);
+                error!(
+                    "rmdir(parent={}, name={}) => {:?}",
+                    parent,
+                    name.to_string_lossy(),
+                    err
+                );
                 reply.error(translate_error(err))
             }
         }

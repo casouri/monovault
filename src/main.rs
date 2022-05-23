@@ -1,5 +1,5 @@
 use clap::{Arg, Command};
-use fuser;
+use fuser::{self, MountOption};
 use monovault::{database::Database, fuse::FS, local_vault::LocalVault, types::*};
 use std::fs;
 use std::path::Path;
@@ -39,6 +39,20 @@ fn main() {
     let local_vault = LocalVault::new(&config.local_vault_name, Arc::clone(&database))
         .expect("Cannot create local vault instance");
 
+    let options = vec![
+        MountOption::FSName("monovault".to_string()),
+        // Auto unmount on process exit.
+        MountOption::AutoUnmount,
+        // Allow root user to access this file system.
+        MountOption::AllowRoot,
+        // Disable special character and block devices
+        MountOption::NoDev,
+        // All I/O will be done asynchronously
+        MountOption::Async,
+        // Prevents Apple from generating ._ files.
+        MountOption::CUSTOM("noapplexattr".to_string()),
+        MountOption::CUSTOM("noappledouble".to_string()),
+    ];
     let fs = FS::new(vec![Box::new(local_vault)]);
-    fuser::mount2(fs, &config.mount_point, &[]).unwrap();
+    fuser::mount2(fs, &config.mount_point, &options).unwrap();
 }
