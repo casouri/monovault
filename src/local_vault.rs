@@ -62,6 +62,19 @@ impl RefCounter {
             None => 0,
         }
     }
+
+    /// Return true if `file`'s count isn't zero.
+    pub fn nonzero(&self, file: Inode) -> bool {
+        match self.ref_count.lock().unwrap().get(&file) {
+            Some(&count) => count != 0,
+            None => false,
+        }
+    }
+
+    /// Set `file`'s count to 0.
+    pub fn set_to_zero(&self, file: Inode) {
+        self.ref_count.lock().unwrap().remove(&file);
+    }
 }
 
 /// Local vault delegates metadata work to the database, and mainly
@@ -80,6 +93,8 @@ pub struct LocalVault {
     /// of that file reaches 0, the file handler can be closed, and
     /// the file can be deleted from disk (if requested).
     ref_count: RefCounter,
+    /// Records whether an opened file is modified (written).
+    mod_track: RefCounter,
     /// The next allocated inode is current_inode + 1.
     current_inode: AtomicU64,
     /// Files waiting to be deleted.
@@ -109,6 +124,7 @@ impl LocalVault {
             database: Mutex::new(database),
             fd_map: Mutex::new(HashMap::new()),
             ref_count: RefCounter::new(),
+            mod_track: RefCounter::new(),
             current_inode: AtomicU64::new(current_inode),
             pending_delete: Mutex::new(vec![]),
         })
@@ -232,8 +248,10 @@ impl Vault for LocalVault {
         // self.check_is_regular_file(file)?;
         self.check_data_file_exists(file)?;
         let lck = self.get_file(file)?;
-        let mut file = lck.lock().unwrap();
-        Ok(file.write(data)? as u32)
+        let mut fd = lck.lock().unwrap();
+        let size = fd.write(data)?;
+        self.mod_track.incf(file)?;
+        Ok(size as u32)
     }
 
     fn create(&self, parent: Inode, name: &str, kind: VaultFileType) -> VaultResult<Inode> {
@@ -282,15 +300,29 @@ impl Vault for LocalVault {
         let count = self.ref_count.decf(file)?;
         if count == 0 {
             let mut map = self.fd_map.lock().unwrap();
+            // When the file is dropped it is automatically closed. We
+            // never store the file else where so this is when the
+            // file is dropped (unless a concurrent read/write is
+            // using it, but after the function ends it is dropped,
+            // even that shouldn't be possible since ref count is 0
+            // now).
             map.remove(&file);
+            self.mod_track.set_to_zero(file);
         }
         let current_time = time::SystemTime::now()
             .duration_since(time::UNIX_EPOCH)?
             .as_secs();
-        self.database
-            .lock()
-            .unwrap()
-            .set_attr(file, None, Some(current_time))?;
+        let modified = self.mod_track.nonzero(file);
+        // We hold the lock when retrieving version and setting it.
+        let mut db_lock = self.database.lock().unwrap();
+        let version = db_lock.attr(file)?.version;
+        db_lock.set_attr(
+            file,
+            None,
+            Some(current_time),
+            if modified { Some(current_time) } else { None },
+            if modified { Some(version + 1) } else { None },
+        )?;
         Ok(())
     }
 

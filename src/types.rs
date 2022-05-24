@@ -30,7 +30,9 @@ pub struct DirEntry {
     pub inode: Inode,
     pub name: String,
     pub kind: VaultFileType,
-    pub last_mod: u64,
+    pub atime: u64,
+    pub mtime: u64,
+    pub version: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -39,7 +41,9 @@ pub struct FileInfo {
     pub name: String,
     pub kind: VaultFileType,
     pub size: u64,
-    pub last_mod: u64,
+    pub atime: u64,
+    pub mtime: u64,
+    pub version: u64,
 }
 
 pub fn entry2info(entry: &DirEntry, size: u64) -> FileInfo {
@@ -48,7 +52,9 @@ pub fn entry2info(entry: &DirEntry, size: u64) -> FileInfo {
         name: entry.name.clone(),
         kind: entry.kind,
         size,
-        last_mod: entry.last_mod,
+        atime: entry.atime,
+        mtime: entry.mtime,
+        version: entry.version,
     }
 }
 

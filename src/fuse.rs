@@ -46,17 +46,26 @@ fn ttl() -> time::Duration {
     time::Duration::new(30, 0)
 }
 
-fn attr(ino: Inode, kind: FileType, size: u64) -> FileAttr {
+fn attr(ino: Inode, kind: FileType, size: u64, atime: u64, mtime: u64) -> FileAttr {
     FileAttr {
         ino,
         size,
         blocks: 1,
         // Last access.
-        atime: ts(),
+        atime: time::UNIX_EPOCH
+            .checked_add(time::Duration::new(atime, 0))
+            .or(Some(ts()))
+            .unwrap(),
         // Last modification.
-        mtime: ts(),
+        mtime: time::UNIX_EPOCH
+            .checked_add(time::Duration::new(mtime, 0))
+            .or(Some(ts()))
+            .unwrap(),
         // Last change.
-        ctime: ts(),
+        ctime: time::UNIX_EPOCH
+            .checked_add(time::Duration::new(mtime, 0))
+            .or(Some(ts()))
+            .unwrap(),
         // Creation time (macOS only).
         crtime: ts(),
         blksize: 1,
@@ -149,7 +158,9 @@ impl FS {
                 name: "/".to_string(),          // -> This is not used.
                 kind: VaultFileType::Directory, // -> This is used.
                 size: 1,                        // -> This is used.
-                last_mod: 0,                    // -> TODO: track this
+                atime: 0,                       // -> TODO: track this
+                mtime: 0,                       // -> TODO: track this
+                version: 0,                     // -> TODO: track this
             })
         } else {
             let vault = self.get_vault(_ino)?;
@@ -157,10 +168,12 @@ impl FS {
             Ok(FileInfo {
                 // This is not used but we should do TRT.
                 inode: self.to_outer(&vault, info.inode),
-                name: info.name, // This is not used
-                kind: info.kind, // This is used.
-                size: info.size, // This is used.
-                last_mod: 0,     // TODO: track this.
+                name: info.name,       // This is not used
+                kind: info.kind,       // This is used.
+                size: info.size,       // This is used.
+                atime: info.atime,     // This is used.
+                mtime: info.mtime,     // This is used.
+                version: info.version, // This is not used.
             })
         }
     }
@@ -378,8 +391,13 @@ impl Filesystem for FS {
         match self.lookup_1(_req, _parent, _name) {
             Ok(info) => reply.entry(
                 &ttl(),
-                // TODO: add last_mod.
-                &attr(info.inode, translate_kind(info.kind), info.size),
+                &attr(
+                    info.inode,
+                    translate_kind(info.kind),
+                    info.size,
+                    info.atime,
+                    info.mtime,
+                ),
                 0,
             ),
             Err(err) => {
@@ -402,14 +420,24 @@ impl Filesystem for FS {
         match self.getattr_1(_req, _ino) {
             Ok(entry) => {
                 debug!(
-                    "getattr({}) => (ino={}, kind={:?}, size={})",
+                    "getattr({}) => (ino={}, kind={:?}, size={}, atime={}, mtime={})",
                     _ino,
                     _ino,
                     translate_kind(entry.kind),
-                    entry.size
+                    entry.size,
+                    entry.atime,
+                    entry.mtime,
                 );
-                // TODO: add last_mod.
-                reply.attr(&ttl(), &attr(_ino, translate_kind(entry.kind), entry.size))
+                reply.attr(
+                    &ttl(),
+                    &attr(
+                        _ino,
+                        translate_kind(entry.kind),
+                        entry.size,
+                        entry.atime,
+                        entry.mtime,
+                    ),
+                )
             }
             Err(err) => {
                 error!("getattr({}) => {:?}", _ino, err);
@@ -461,7 +489,14 @@ impl Filesystem for FS {
                     name.to_string_lossy(),
                     inode
                 );
-                reply.created(&ttl(), &attr(inode, FileType::RegularFile, 0), 0, 0, 0)
+                reply.created(
+                    &ttl(),
+                    // TODO: use current time for atime and mtime instead.
+                    &attr(inode, FileType::RegularFile, 0, 0, 0),
+                    0,
+                    0,
+                    0,
+                )
             }
             Err(err) => {
                 error!(
@@ -615,7 +650,8 @@ impl Filesystem for FS {
                     name.to_string_lossy(),
                     inode
                 );
-                reply.entry(&ttl(), &attr(inode, FileType::Directory, 1), 0)
+                // TODO: Use current time for atime and mtime.
+                reply.entry(&ttl(), &attr(inode, FileType::Directory, 1, 0, 0), 0)
             }
             Err(err) => {
                 error!(

@@ -34,7 +34,9 @@ primary key (parent, child)
 file int,
 name char(100),
 type int,
-last_mod int
+atime int,
+mtime int,
+version int
 primary key (file)
 );",
         [],
@@ -89,7 +91,7 @@ impl Database {
     /// Return attributes of `file`.
     pub fn attr(&mut self, file: Inode) -> VaultResult<DirEntry> {
         let entry = self.db.query_row(
-            "select name, type, last_mod from Type where file=?",
+            "select name, type, atime, mtime, version from Type where file=?",
             [file],
             |row| {
                 Ok(DirEntry {
@@ -102,7 +104,9 @@ impl Database {
                             VaultFileType::Directory
                         }
                     },
-                    last_mod: row.get_unwrap(2),
+                    atime: row.get_unwrap(2),
+                    mtime: row.get_unwrap(3),
+                    version: row.get_unwrap(4),
                 })
             },
         )?;
@@ -152,20 +156,28 @@ impl Database {
         &mut self,
         file: Inode,
         name: Option<&str>,
-        last_mod: Option<u64>,
+        atime: Option<u64>,
+        mtime: Option<u64>,
+        version: Option<u64>,
     ) -> VaultResult<()> {
         info!(
-            "set_attr(file={}, name={:?}, last_mod={:?})",
-            file, name, last_mod
+            "set_attr(file={}, name={:?}, atime={:?}, mtime={:?}, version={:?})",
+            file, name, atime, mtime, version
         );
         let transaction = self.db.transaction()?;
         if let Some(name) = name {
             transaction.execute("update Type set name=? where file=?", params![name, file])?;
         }
-        if let Some(last_mod) = last_mod {
+        if let Some(atime) = atime {
+            transaction.execute("update Type set atime=? where file=?", params![atime, file])?;
+        }
+        if let Some(mtime) = mtime {
+            transaction.execute("update Type set mtime=? where file=?", params![mtime, file])?;
+        }
+        if let Some(version) = version {
             transaction.execute(
-                "update Type set last_mod=? where file=?",
-                params![last_mod, file],
+                "update Type set version=? where file=?",
+                params![version, file],
             )?;
         }
         transaction.commit()?;
