@@ -89,12 +89,12 @@ impl Database {
     }
 
     /// Return attributes of `file`.
-    pub fn attr(&mut self, file: Inode) -> VaultResult<DirEntry> {
+    pub fn attr(&mut self, file: Inode) -> VaultResult<FileInfo> {
         let entry = self.db.query_row(
             "select name, type, atime, mtime, version from Type where file=?",
             [file],
             |row| {
-                Ok(DirEntry {
+                Ok(FileInfo {
                     inode: file,
                     name: row.get_unwrap(0),
                     kind: {
@@ -107,6 +107,8 @@ impl Database {
                     atime: row.get_unwrap(2),
                     mtime: row.get_unwrap(3),
                     version: row.get_unwrap(4),
+                    // Filled by LocalVault::attr().
+                    size: 0,
                 })
             },
         )?;
@@ -194,7 +196,8 @@ impl Database {
                 let grandchildren = self.readdir(child)?;
                 let mut empty = true;
                 for gchild in grandchildren {
-                    if gchild.name != "." && gchild.name != ".." {
+                    let info = self.attr(gchild)?;
+                    if info.name != "." && info.name != ".." {
                         empty = false;
                     }
                 }
@@ -222,8 +225,8 @@ impl Database {
 
     /// List directory entries of `file`. The listing includes "." and
     /// "..", but if `file` is vault root, ".." is not included.
-    pub fn readdir(&mut self, file: Inode) -> VaultResult<Vec<DirEntry>> {
-        let mut result = vec![];
+    pub fn readdir(&mut self, file: Inode) -> VaultResult<Vec<Inode>> {
+        // let mut result = vec![];
         // Get each entry from the database.
         let mut children = {
             let mut statment = self
@@ -251,10 +254,10 @@ impl Database {
         }
         // Self.attr accesses database too, so it can't be interleaved
         // with quering.
-        for child in children {
-            let entry = self.attr(child)?;
-            result.push(entry);
-        }
-        Ok(result)
+        // for child in children {
+        //     let entry = self.attr(child)?;
+        //     result.push(entry);
+        // }
+        Ok(children)
     }
 }

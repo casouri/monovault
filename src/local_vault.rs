@@ -182,6 +182,13 @@ impl LocalVault {
             Err(VaultError::FileNotExist(file))
         }
     }
+
+    /// Copy `file` to `path`.
+    pub fn copy_file(&self, file: Inode, path: &Path) -> VaultResult<u64> {
+        let from_path = self.compose_path(file);
+        let size = std::fs::copy(&from_path, path)?;
+        Ok(size)
+    }
 }
 
 impl Vault for LocalVault {
@@ -200,15 +207,16 @@ impl Vault for LocalVault {
 
     fn attr(&self, file: Inode) -> VaultResult<FileInfo> {
         debug!("attr(file={})", file);
-        let entry = self.database.lock().unwrap().attr(file)?;
-        let size = match entry.kind {
+        let mut info = self.database.lock().unwrap().attr(file)?;
+        let size = match info.kind {
             VaultFileType::File => {
                 let meta = std::fs::metadata(self.compose_path(file))?;
                 meta.len()
             }
             VaultFileType::Directory => 1,
         };
-        Ok(entry2info(&entry, size))
+        info.size = size;
+        Ok(info)
     }
 
     fn read(&self, file: Inode, offset: i64, size: u32) -> VaultResult<Vec<u8>> {
@@ -354,8 +362,13 @@ impl Vault for LocalVault {
         Ok(())
     }
 
-    fn readdir(&self, dir: Inode) -> VaultResult<Vec<DirEntry>> {
+    fn readdir(&self, dir: Inode) -> VaultResult<Vec<FileInfo>> {
         info!("readdir(dir={})", dir);
-        self.database.lock().unwrap().readdir(dir)
+        let entries = self.database.lock().unwrap().readdir(dir)?;
+        let mut result = vec![];
+        for file in entries {
+            result.push(self.attr(file)?)
+        }
+        Ok(result)
     }
 }

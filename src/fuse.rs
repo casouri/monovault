@@ -164,17 +164,9 @@ impl FS {
             })
         } else {
             let vault = self.get_vault(_ino)?;
-            let info = vault.attr(self.to_inner(&vault, _ino))?;
-            Ok(FileInfo {
-                // This is not used but we should do TRT.
-                inode: self.to_outer(&vault, info.inode),
-                name: info.name,       // This is not used
-                kind: info.kind,       // This is used.
-                size: info.size,       // This is used.
-                atime: info.atime,     // This is used.
-                mtime: info.mtime,     // This is used.
-                version: info.version, // This is not used.
-            })
+            let mut info = vault.attr(self.to_inner(&vault, _ino))?;
+            info.inode = self.to_outer(&vault, info.inode);
+            Ok(info)
         }
     }
 

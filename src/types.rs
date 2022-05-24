@@ -26,16 +26,6 @@ pub enum VaultFileType {
 }
 
 #[derive(Debug, Clone)]
-pub struct DirEntry {
-    pub inode: Inode,
-    pub name: String,
-    pub kind: VaultFileType,
-    pub atime: u64,
-    pub mtime: u64,
-    pub version: u64,
-}
-
-#[derive(Debug, Clone)]
 pub struct FileInfo {
     pub inode: Inode,
     pub name: String,
@@ -44,18 +34,6 @@ pub struct FileInfo {
     pub atime: u64,
     pub mtime: u64,
     pub version: u64,
-}
-
-pub fn entry2info(entry: &DirEntry, size: u64) -> FileInfo {
-    FileInfo {
-        inode: entry.inode,
-        name: entry.name.clone(),
-        kind: entry.kind,
-        size,
-        atime: entry.atime,
-        mtime: entry.mtime,
-        version: entry.version,
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -134,5 +112,11 @@ pub trait Vault {
     fn delete(&self, file: Inode) -> VaultResult<()>;
     /// List directory entries of `dir`. The listing includes "." and
     /// "..", but if `dir` is vault root, ".." is not included.
-    fn readdir(&self, dir: Inode) -> VaultResult<Vec<DirEntry>>;
+    fn readdir(&self, dir: Inode) -> VaultResult<Vec<FileInfo>>;
+}
+
+pub trait VaultCache {
+    fn pull_meta(&self, source: &Box<dyn Vault>, file: Inode) -> VaultResult<FileInfo>;
+    fn pull_data(&self, source: &Box<dyn Vault>, file: Inode) -> VaultResult<Vec<u8>>;
+    fn push_data(&self, dest: &Box<dyn Vault>, file: Inode, data: &[u8]) -> VaultResult<()>;
 }

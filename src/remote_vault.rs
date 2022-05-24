@@ -38,7 +38,7 @@ impl Vault for RemoteVault {
     fn delete(&self, file: Inode) -> VaultResult<()> {
         todo!()
     }
-    fn readdir(&self, dir: Inode) -> VaultResult<Vec<DirEntry>> {
+    fn readdir(&self, dir: Inode) -> VaultResult<Vec<FileInfo>> {
         todo!()
     }
 }
