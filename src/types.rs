@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::boxed::Box;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
+use std::time;
 
 pub type VaultName = String;
 pub type VaultAddress = String;
@@ -24,21 +25,34 @@ pub enum VaultFileType {
     Directory,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DirEntry {
     pub inode: Inode,
     pub name: String,
     pub kind: VaultFileType,
+    pub last_mod: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FileInfo {
     pub inode: Inode,
     pub name: String,
     pub kind: VaultFileType,
     pub size: u64,
+    pub last_mod: u64,
 }
 
+pub fn entry2info(entry: &DirEntry, size: u64) -> FileInfo {
+    FileInfo {
+        inode: entry.inode,
+        name: entry.name.clone(),
+        kind: entry.kind,
+        size,
+        last_mod: entry.last_mod,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 pub enum OpenMode {
     R,
     RW,
@@ -59,6 +73,7 @@ pub enum VaultError {
     WriteConflict(Inode, u64, u64),
     SqliteError(rusqlite::Error),
     MarshallError(serde_json::Error),
+    SystemTimeError(time::SystemTimeError),
     IOError(std::io::Error),
 }
 
@@ -77,6 +92,12 @@ impl From<serde_json::Error> for VaultError {
 impl From<std::io::Error> for VaultError {
     fn from(err: std::io::Error) -> Self {
         VaultError::IOError(err)
+    }
+}
+
+impl From<time::SystemTimeError> for VaultError {
+    fn from(err: time::SystemTimeError) -> Self {
+        VaultError::SystemTimeError(err)
     }
 }
 

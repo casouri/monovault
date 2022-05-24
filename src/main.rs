@@ -23,6 +23,8 @@ fn main() {
     let config_path = matches.value_of("config").unwrap();
     let config: Config = serde_json::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
 
+    // TODO: Check for duplicate vault name.
+
     let mount_point = Path::new(&config.mount_point);
     if !mount_point.exists() {
         panic!("Mount point doesn't exist");
@@ -33,22 +35,17 @@ fn main() {
         fs::create_dir(&db_path).expect("Cannot create directory for database");
     }
 
-    let database = Arc::new(Mutex::new(
-        Database::new(&db_path).expect("Cannot create database"),
-    ));
-    let local_vault = LocalVault::new(&config.local_vault_name, Arc::clone(&database))
+    let local_vault = LocalVault::new(&config.local_vault_name, &db_path)
         .expect("Cannot create local vault instance");
 
     let options = vec![
         MountOption::FSName("monovault".to_string()),
-        // Auto unmount on process exit.
+        // Auto unmount on process exit (doesn't seem to work).
         MountOption::AutoUnmount,
         // Allow root user to access this file system.
         MountOption::AllowRoot,
         // Disable special character and block devices
         MountOption::NoDev,
-        // All I/O will be done asynchronously
-        MountOption::Async,
         // Prevents Apple from generating ._ files.
         MountOption::CUSTOM("noapplexattr".to_string()),
         MountOption::CUSTOM("noappledouble".to_string()),

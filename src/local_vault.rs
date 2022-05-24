@@ -6,11 +6,63 @@ use log::{debug, info};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicU64, Ordering::SeqCst},
     Arc, Mutex,
 };
+use std::time;
+
+#[derive(Debug)]
+pub struct RefCounter {
+    ref_count: Mutex<HashMap<Inode, u64>>,
+}
+
+impl RefCounter {
+    pub fn new() -> RefCounter {
+        RefCounter {
+            ref_count: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Increment ref count of `file`.
+    pub fn incf(&self, file: Inode) -> VaultResult<u64> {
+        let mut map = self.ref_count.lock().unwrap();
+        let count = match map.get(&file) {
+            Some(&count) => count,
+            None => 0,
+        };
+        if count == u64::MAX {
+            Err(VaultError::U64Overflow(file))
+        } else {
+            map.insert(file, count + 1);
+            Ok(count + 1)
+        }
+    }
+
+    /// Decrement ref count of `file`.
+    pub fn decf(&self, file: Inode) -> VaultResult<u64> {
+        let mut map = self.ref_count.lock().unwrap();
+        let count = match map.get(&file) {
+            Some(&count) => count,
+            None => 0,
+        };
+        if count == 0 {
+            Err(VaultError::U64Underflow(file))
+        } else {
+            map.insert(file, count - 1);
+            Ok(count - 1)
+        }
+    }
+
+    /// Return the ref count of `file`.
+    pub fn count(&self, file: Inode) -> u64 {
+        match self.ref_count.lock().unwrap().get(&file) {
+            Some(&count) => count,
+            None => 0,
+        }
+    }
+}
 
 /// Local vault delegates metadata work to the database, and mainly
 /// works on locating the "data file" for each file, and reading and
@@ -19,14 +71,15 @@ use std::sync::{
 pub struct LocalVault {
     /// Name of this vault.
     name: String,
+    data_file_dir: PathBuf,
     /// Database for metadata.
-    database: Arc<Mutex<Database>>,
+    database: Mutex<Database>,
     /// Maps inode to file handlers.
     fd_map: Mutex<HashMap<Inode, Arc<Mutex<File>>>>,
     /// Counts the number of references to each file, when ref count
     /// of that file reaches 0, the file handler can be closed, and
     /// the file can be deleted from disk (if requested).
-    ref_count: Mutex<HashMap<Inode, u64>>,
+    ref_count: RefCounter,
     /// The next allocated inode is current_inode + 1.
     current_inode: AtomicU64,
     /// Files waiting to be deleted.
@@ -35,15 +88,27 @@ pub struct LocalVault {
 
 impl LocalVault {
     /// `name` is the name of the vault, also the directory name of
-    /// the vault root.
-    pub fn new(name: &str, database: Arc<Mutex<Database>>) -> VaultResult<LocalVault> {
-        let current_inode = { database.lock().unwrap().largest_inode() };
+    /// the vault root. `store_path` is the directory for database and
+    /// data files. `store_path/db` contains databases and
+    /// `store_path/data` contains data files.
+    pub fn new(name: &str, store_path: &Path) -> VaultResult<LocalVault> {
+        let data_file_dir = store_path.join("data");
+        if !data_file_dir.exists() {
+            std::fs::create_dir(&data_file_dir)?
+        }
+        let db_dir = store_path.join("db");
+        if !db_dir.exists() {
+            std::fs::create_dir(&db_dir)?
+        }
+        let mut database = Database::new(&db_dir, name)?;
+        let current_inode = { database.largest_inode() };
         info!("vault {} next_inode={}", name, current_inode);
         Ok(LocalVault {
             name: name.to_string(),
-            database,
+            data_file_dir,
+            database: Mutex::new(database),
             fd_map: Mutex::new(HashMap::new()),
-            ref_count: Mutex::new(HashMap::new()),
+            ref_count: RefCounter::new(),
             current_inode: AtomicU64::new(current_inode),
             pending_delete: Mutex::new(vec![]),
         })
@@ -60,10 +125,7 @@ impl LocalVault {
     /// Get the path to where the content of `file` is stored.
     /// Basically `db_path/vault_name-inode`.
     fn compose_path(&self, file: Inode) -> PathBuf {
-        self.database
-            .lock()
-            .unwrap()
-            .path()
+        self.data_file_dir
             .join(format!("{}-{}", self.name(), file.to_string()))
     }
 
@@ -104,44 +166,6 @@ impl LocalVault {
             Err(VaultError::FileNotExist(file))
         }
     }
-
-    /// Increment ref count of `file`.
-    fn incf_ref_count(&self, file: Inode) -> VaultResult<u64> {
-        let mut map = self.ref_count.lock().unwrap();
-        let count = match map.get(&file) {
-            Some(&count) => count,
-            None => 0,
-        };
-        if count == u64::MAX {
-            Err(VaultError::U64Overflow(file))
-        } else {
-            map.insert(file, count + 1);
-            Ok(count + 1)
-        }
-    }
-
-    /// Decrement ref count of `file`.
-    fn decf_ref_count(&self, file: Inode) -> VaultResult<u64> {
-        let mut map = self.ref_count.lock().unwrap();
-        let count = match map.get(&file) {
-            Some(&count) => count,
-            None => 0,
-        };
-        if count == 0 {
-            Err(VaultError::U64Underflow(file))
-        } else {
-            map.insert(file, count - 1);
-            Ok(count - 1)
-        }
-    }
-
-    /// Return the ref count of `file`.
-    fn ref_count(&self, file: Inode) -> u64 {
-        match self.ref_count.lock().unwrap().get(&file) {
-            Some(&count) => count,
-            None => 0,
-        }
-    }
 }
 
 impl Vault for LocalVault {
@@ -168,17 +192,17 @@ impl Vault for LocalVault {
             }
             VaultFileType::Directory => 1,
         };
-        Ok(FileInfo {
-            inode: entry.inode,
-            name: entry.name,
-            kind: entry.kind,
-            size,
-        })
+        Ok(entry2info(&entry, size))
     }
 
     fn read(&self, file: Inode, offset: i64, size: u32) -> VaultResult<Vec<u8>> {
         info!("read(file={}, offset={}, size={})", file, offset, size);
-        self.check_is_regular_file(file)?;
+        // We don't access database during read because delete() will
+        // remove the file from the database but before the last
+        // close() is called, we still need to be able to serve read
+        // and write.
+        //
+        // self.check_is_regular_file(file)?;
         self.check_data_file_exists(file)?;
         let lck = self.get_file(file)?;
         let mut file = lck.lock().unwrap();
@@ -200,7 +224,12 @@ impl Vault for LocalVault {
 
     fn write(&self, file: Inode, offset: i64, data: &[u8]) -> VaultResult<u32> {
         info!("write(file={}, offset={})", file, offset);
-        self.check_is_regular_file(file)?;
+        // We don't access database during write because delete() will
+        // remove the file from the database but before the last
+        // close() is called, we still need to be able to serve read
+        // and write.
+        //
+        // self.check_is_regular_file(file)?;
         self.check_data_file_exists(file)?;
         let lck = self.get_file(file)?;
         let mut file = lck.lock().unwrap();
@@ -221,11 +250,14 @@ impl Vault for LocalVault {
         }
         // NOTE: Make sure we create data file before creating
         // metadata, to ensure consistency.
+        let current_time = time::SystemTime::now()
+            .duration_since(time::UNIX_EPOCH)?
+            .as_secs();
         self.database
             .lock()
             .unwrap()
-            .add_file(parent, inode, name, kind)?;
-        self.incf_ref_count(inode)?;
+            .add_file(parent, inode, name, kind, current_time)?;
+        self.ref_count.incf(inode)?;
         info!("created {}", inode);
         Ok(inode)
     }
@@ -234,19 +266,31 @@ impl Vault for LocalVault {
         info!("open(file={})", file);
         self.check_is_regular_file(file)?;
         self.check_data_file_exists(file)?;
-        self.incf_ref_count(file)?;
+        self.ref_count.incf(file)?;
         Ok(())
     }
 
     fn close(&self, file: Inode) -> VaultResult<()> {
         info!("close(file={})", file);
-        self.check_is_regular_file(file)?;
+        // We don't access database during write because delete() will
+        // remove the file from the database but before the last
+        // close() is called, we still need to be able to serve read
+        // and write.
+        //
+        // self.check_is_regular_file(file)?;
         self.check_data_file_exists(file)?;
-        let count = self.decf_ref_count(file)?;
+        let count = self.ref_count.decf(file)?;
         if count == 0 {
             let mut map = self.fd_map.lock().unwrap();
             map.remove(&file);
         }
+        let current_time = time::SystemTime::now()
+            .duration_since(time::UNIX_EPOCH)?
+            .as_secs();
+        self.database
+            .lock()
+            .unwrap()
+            .set_attr(file, None, Some(current_time))?;
         Ok(())
     }
 
@@ -262,7 +306,7 @@ impl Vault for LocalVault {
         match kind {
             VaultFileType::File => {
                 self.check_data_file_exists(file)?;
-                if self.ref_count(file) == 0 {
+                if self.ref_count.count(file) == 0 {
                     std::fs::remove_file(self.compose_path(file))?;
                 } else {
                     // If there are other references to the file,

@@ -88,6 +88,7 @@ fn translate_error(err: VaultError) -> libc::c_int {
         VaultError::NotDirectory(_) => libc::ENOTDIR,
         VaultError::IsDirectory(_) => libc::EISDIR,
         VaultError::DirectoryNotEmpty(_) => libc::ENOTEMPTY,
+        VaultError::NetworkError(_) => libc::EREMOTE,
         _ => libc::EIO,
     }
 }
@@ -148,6 +149,7 @@ impl FS {
                 name: "/".to_string(),          // -> This is not used.
                 kind: VaultFileType::Directory, // -> This is used.
                 size: 1,                        // -> This is used.
+                last_mod: 0,                    // -> TODO: track this
             })
         } else {
             let vault = self.get_vault(_ino)?;
@@ -158,6 +160,7 @@ impl FS {
                 name: info.name, // This is not used
                 kind: info.kind, // This is used.
                 size: info.size, // This is used.
+                last_mod: 0,     // TODO: track this.
             })
         }
     }
@@ -375,6 +378,7 @@ impl Filesystem for FS {
         match self.lookup_1(_req, _parent, _name) {
             Ok(info) => reply.entry(
                 &ttl(),
+                // TODO: add last_mod.
                 &attr(info.inode, translate_kind(info.kind), info.size),
                 0,
             ),
@@ -404,6 +408,7 @@ impl Filesystem for FS {
                     translate_kind(entry.kind),
                     entry.size
                 );
+                // TODO: add last_mod.
                 reply.attr(&ttl(), &attr(_ino, translate_kind(entry.kind), entry.size))
             }
             Err(err) => {

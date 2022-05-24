@@ -2,6 +2,7 @@ use crate::types::*;
 use log::{debug, info};
 use rusqlite::params;
 use std::path::{Path, PathBuf};
+use std::time;
 
 /// Database is used for maintaining meta information, eg, which files
 /// are contained in a directory, what's the type of each file
@@ -14,32 +15,57 @@ pub struct Database {
     db: rusqlite::Connection,
     /// The path containing the database file and cache files.
     db_path: PathBuf,
+    db_name: String,
 }
 
-impl Database {
-    /// The database file is created at `db_path/store.sqlite3`.
-    pub fn new(db_path: &Path) -> VaultResult<Database> {
-        let connection = rusqlite::Connection::open(&db_path.join("store.sqlite3"))?;
-        connection.execute(
-            "create table if not exists HasChild (
+/// Setup the database if not already set up.
+fn setup_db(connection: &mut rusqlite::Connection) -> VaultResult<()> {
+    // Create tables.
+    connection.execute(
+        "create table if not exists HasChild (
 parent int,
 child int,
 primary key (parent, child)
 );",
-            [],
-        )?;
-        connection.execute(
-            "create table if not exists Type (
+        [],
+    )?;
+    connection.execute(
+        "create table if not exists Type (
 file int,
 name char(100),
 type int,
+last_mod int
 primary key (file)
 );",
-            [],
-        )?;
+        [],
+    )?;
+    // Insert root directory if not exists.
+    match connection.query_row::<u64, _, _>("select file from Type where file=1", [], |row| {
+        Ok(row.get_unwrap(0))
+    }) {
+        Ok(_) => Ok(()),
+        Err(QueryReturnedNoRows) => {
+            connection.execute(
+                "insert into Type (file, name, type, last_mod) values (1, '/', 1, 0)",
+                [],
+            )?;
+            Ok(())
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+impl Database {
+    /// The database file is created at `db_path/store.sqlite3`.
+    pub fn new(db_path: &Path, db_name: &str) -> VaultResult<Database> {
+        let mut connection =
+            rusqlite::Connection::open(&db_path.join(format!("{}.sqlite3", db_name)))?;
+        setup_db(&mut connection)?;
+
         Ok(Database {
             db: connection,
             db_path: db_path.to_path_buf(),
+            db_name: db_name.to_string(),
         })
     }
 
@@ -62,31 +88,24 @@ primary key (file)
 
     /// Return attributes of `file`.
     pub fn attr(&mut self, file: Inode) -> VaultResult<DirEntry> {
-        // Root directory is never recorded in the Type table. It is
-        // annoying to insert it if not exists, so we just special
-        // case it.
-        if file == 1 {
-            return Ok(DirEntry {
-                inode: 1,
-                name: "/".to_string(),
-                kind: VaultFileType::Directory,
-            });
-        }
-        let entry =
-            self.db
-                .query_row("select name, type from Type where file=?", [file], |row| {
-                    Ok(DirEntry {
-                        inode: file,
-                        name: row.get_unwrap(0),
-                        kind: {
-                            if row.get_unwrap::<_, i32>(1) == 0 {
-                                VaultFileType::File
-                            } else {
-                                VaultFileType::Directory
-                            }
-                        },
-                    })
-                })?;
+        let entry = self.db.query_row(
+            "select name, type, last_mod from Type where file=?",
+            [file],
+            |row| {
+                Ok(DirEntry {
+                    inode: file,
+                    name: row.get_unwrap(0),
+                    kind: {
+                        if row.get_unwrap::<_, i32>(1) == 0 {
+                            VaultFileType::File
+                        } else {
+                            VaultFileType::Directory
+                        }
+                    },
+                    last_mod: row.get_unwrap(2),
+                })
+            },
+        )?;
         debug!("attr({}) => {:?}", file, &entry);
         Ok(entry)
     }
@@ -100,6 +119,7 @@ primary key (file)
         child: Inode,
         name: &str,
         kind: VaultFileType,
+        last_mod: u64,
     ) -> VaultResult<()> {
         info!(
             "add_file(parent={}, child={}, name={}, kind={:?})",
@@ -115,13 +135,39 @@ primary key (file)
             VaultFileType::Directory => 1,
         };
         transaction.execute(
-            "insert into Type (file, name, type) values (?, ?, ?)",
-            params![child, name.to_string(), type_val],
+            "insert into Type (file, name, type, last_mod) values (?, ?, ?, ?)",
+            params![child, name.to_string(), type_val, last_mod],
         )?;
         transaction.execute(
             "insert into HasChild (parent, child) values (?, ?)",
             [parent, child],
         )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Set `file`'s attributes: `name` and `last_mod`. None means
+    /// don't change.
+    pub fn set_attr(
+        &mut self,
+        file: Inode,
+        name: Option<&str>,
+        last_mod: Option<u64>,
+    ) -> VaultResult<()> {
+        info!(
+            "set_attr(file={}, name={:?}, last_mod={:?})",
+            file, name, last_mod
+        );
+        let transaction = self.db.transaction()?;
+        if let Some(name) = name {
+            transaction.execute("update Type set name=? where file=?", params![name, file])?;
+        }
+        if let Some(last_mod) = last_mod {
+            transaction.execute(
+                "update Type set last_mod=? where file=?",
+                params![last_mod, file],
+            )?;
+        }
         transaction.commit()?;
         Ok(())
     }
@@ -166,27 +212,8 @@ primary key (file)
     /// "..", but if `file` is vault root, ".." is not included.
     pub fn readdir(&mut self, file: Inode) -> VaultResult<Vec<DirEntry>> {
         let mut result = vec![];
-        result.push(DirEntry {
-            inode: file,
-            name: ".".to_string(),
-            kind: VaultFileType::Directory,
-        });
-        // If this is the root of this vault, we let fuse to add
-        // parent directory.
-        if file != 1 {
-            let parent =
-                self.db
-                    .query_row("select parent from HasChild where child=?", [file], |row| {
-                        Ok(row.get_unwrap(0))
-                    })?;
-            result.push(DirEntry {
-                inode: parent,
-                name: "..".to_string(),
-                kind: VaultFileType::Directory,
-            });
-        }
         // Get each entry from the database.
-        let children = {
+        let mut children = {
             let mut statment = self
                 .db
                 .prepare("select child from HasChild where parent=?")?;
@@ -198,6 +225,18 @@ primary key (file)
             children
         };
         info!("readdir({}) => {:?}", file, children);
+        // Add itself.
+        children.push(file);
+        // Add parent unless FILE is the root dir, in which case
+        // parent is added for us by fuse.
+        if file != 1 {
+            let parent =
+                self.db
+                    .query_row("select parent from HasChild where child=?", [file], |row| {
+                        Ok(row.get_unwrap(0))
+                    })?;
+            children.push(parent);
+        }
         // Self.attr accesses database too, so it can't be interleaved
         // with quering.
         for child in children {
