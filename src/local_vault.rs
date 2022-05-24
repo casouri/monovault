@@ -279,10 +279,15 @@ impl Vault for LocalVault {
         let current_time = time::SystemTime::now()
             .duration_since(time::UNIX_EPOCH)?
             .as_secs();
-        self.database
-            .lock()
-            .unwrap()
-            .add_file(parent, inode, name, kind, current_time)?;
+        self.database.lock().unwrap().add_file(
+            parent,
+            inode,
+            name,
+            kind,
+            current_time,
+            current_time,
+            1,
+        )?;
         self.ref_count.incf(inode)?;
         info!("created {}", inode);
         Ok(inode)
@@ -364,11 +369,29 @@ impl Vault for LocalVault {
 
     fn readdir(&self, dir: Inode) -> VaultResult<Vec<FileInfo>> {
         info!("readdir(dir={})", dir);
-        let entries = self.database.lock().unwrap().readdir(dir)?;
+        let (this, parent, entries) = self.database.lock().unwrap().readdir(dir)?;
         let mut result = vec![];
         for file in entries {
             result.push(self.attr(file)?)
         }
+        result.push(self.attr(this)?);
+        if parent != 0 {
+            result.push(self.attr(parent)?);
+        }
         Ok(result)
+    }
+}
+
+impl VaultCache for LocalVault {
+    fn pull_meta(&self, source: &Box<dyn Vault>, file: Inode) -> VaultResult<FileInfo> {
+        todo!()
+    }
+
+    fn pull_data(&self, source: &Box<dyn Vault>, file: Inode) -> VaultResult<Vec<u8>> {
+        todo!()
+    }
+
+    fn push_data(&self, dest: &Box<dyn Vault>, file: Inode, data_file: &Path) -> VaultResult<()> {
+        todo!()
     }
 }

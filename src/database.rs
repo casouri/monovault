@@ -25,7 +25,8 @@ fn setup_db(connection: &mut rusqlite::Connection) -> VaultResult<()> {
         "create table if not exists HasChild (
 parent int,
 child int,
-primary key (parent, child)
+primary key (parent, child),
+foreign key (parent, child) references Type(file, file)
 );",
         [],
     )?;
@@ -126,7 +127,9 @@ impl Database {
         child: Inode,
         name: &str,
         kind: VaultFileType,
-        last_mod: u64,
+        atime: u64,
+        mtime: u64,
+        version: u64,
     ) -> VaultResult<()> {
         info!(
             "add_file(parent={}, child={}, name={}, kind={:?})",
@@ -142,8 +145,8 @@ impl Database {
             VaultFileType::Directory => 1,
         };
         transaction.execute(
-            "insert into Type (file, name, type, last_mod) values (?, ?, ?, ?)",
-            params![child, name.to_string(), type_val, last_mod],
+            "insert into Type (file, name, type, atime, mtime, version) values (?, ?, ?, ?, ?, ?)",
+            params![child, name.to_string(), type_val, atime, mtime, version],
         )?;
         transaction.execute(
             "insert into HasChild (parent, child) values (?, ?)",
@@ -153,7 +156,7 @@ impl Database {
         Ok(())
     }
 
-    /// Set `file`'s attributes: `name` and `last_mod`. None means
+    /// Set `file`'s attributes: `name`, `atime`, `mtime`, `version`. None means
     /// don't change.
     pub fn set_attr(
         &mut self,
@@ -194,21 +197,15 @@ impl Database {
         let kind = self.attr(child)?.kind;
         match kind {
             VaultFileType::Directory => {
-                let grandchildren = self.readdir(child)?;
-                let mut empty = true;
-                for gchild in grandchildren {
-                    let info = self.attr(gchild)?;
-                    if info.name != "." && info.name != ".." {
-                        empty = false;
-                    }
-                }
+                let (_, _, grandchildren) = self.readdir(child)?;
+                let empty = grandchildren.len() == 0;
                 if !empty {
                     return Err(VaultError::DirectoryNotEmpty(child));
                 }
             }
             VaultFileType::File => (),
         }
-
+        // Remove parent-child relationship and file meta.
         let parent = self.db.query_row(
             "select parent from HasChild where child=?",
             [child],
@@ -224,9 +221,11 @@ impl Database {
         Ok(())
     }
 
-    /// List directory entries of `file`. The listing includes "." and
-    /// "..", but if `file` is vault root, ".." is not included.
-    pub fn readdir(&mut self, file: Inode) -> VaultResult<Vec<Inode>> {
+    /// List directory entries of `file`. Returns a 3-tuple, first
+    /// element is inode for ".", second for "..", third a vector of
+    /// children. If `file` is the vault root, we don't know "..", so
+    /// the second element will be 0.
+    pub fn readdir(&mut self, file: Inode) -> VaultResult<(Inode, Inode, Vec<Inode>)> {
         // let mut result = vec![];
         // Get each entry from the database.
         let mut children = {
@@ -245,20 +244,20 @@ impl Database {
         children.push(file);
         // Add parent unless FILE is the root dir, in which case
         // parent is added for us by fuse.
-        if file != 1 {
-            let parent =
-                self.db
-                    .query_row("select parent from HasChild where child=?", [file], |row| {
-                        Ok(row.get_unwrap(0))
-                    })?;
-            children.push(parent);
-        }
+        let parent = if file != 1 {
+            self.db
+                .query_row("select parent from HasChild where child=?", [file], |row| {
+                    Ok(row.get_unwrap(0))
+                })?
+        } else {
+            0
+        };
         // Self.attr accesses database too, so it can't be interleaved
         // with quering.
         // for child in children {
         //     let entry = self.attr(child)?;
         //     result.push(entry);
         // }
-        Ok(children)
+        Ok((file, parent, children))
     }
 }
