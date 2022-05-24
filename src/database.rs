@@ -36,7 +36,7 @@ name char(100),
 type int,
 atime int,
 mtime int,
-version int
+version int,
 primary key (file)
 );",
         [],
@@ -46,9 +46,9 @@ primary key (file)
         Ok(row.get_unwrap(0))
     }) {
         Ok(_) => Ok(()),
-        Err(QueryReturnedNoRows) => {
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
             connection.execute(
-                "insert into Type (file, name, type, last_mod) values (1, '/', 1, 0)",
+                "insert into Type (file, name, type, atime, mtime, version) values (1, '/', 1, 0, 0, 1)",
                 [],
             )?;
             Ok(())
@@ -88,7 +88,8 @@ impl Database {
         }
     }
 
-    /// Return attributes of `file`.
+    /// Return attributes of `file`. The `size` field is a dummy value
+    /// and needs to be filled.
     pub fn attr(&mut self, file: Inode) -> VaultResult<FileInfo> {
         let entry = self.db.query_row(
             "select name, type, atime, mtime, version from Type where file=?",
