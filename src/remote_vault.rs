@@ -8,11 +8,14 @@ use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::runtime::{Builder, Runtime};
+use tonic::Request;
 use std::sync::Mutex;
 use tonic::transport::Channel;
 use tokio_stream::StreamExt;
 use crate::types::VaultFileType::File;
 use crate::types::VaultFileType::Directory;
+use tokio_stream::iter;
+use futures_util::stream;
 
 #[derive(Debug)]
 pub struct RemoteVault {
@@ -97,10 +100,13 @@ impl Vault for RemoteVault {
     }
 
     fn write(&self, file: Inode, offset: i64, data: &[u8]) -> VaultResult<u32> {
-        // let rt = self.rt.lock().unwrap();
-        // let mut client = self.client.lock().unwrap();
-        // let response = rt.block_on(client.write(request));
-        todo!()
+        let rt = self.rt.lock().unwrap();
+        let mut client = self.client.lock().unwrap();
+        let mut file2write = vec![];
+        file2write.push(FileToWrite{ name: file, offset, data: data.to_vec() });
+        let request = Request::new(stream::iter(file2write));
+        let response = rt.block_on(client.write(request)).unwrap();
+        Ok(response.into_inner().value)
     }
 
     fn create(&self, parent: Inode, name: &str, kind: VaultFileType) -> VaultResult<Inode> {

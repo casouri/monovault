@@ -13,6 +13,14 @@ impl Vault for CachingVault {
         self.name.clone()
     }
 
+    fn setup(&self) -> VaultResult<()> {
+        todo!()
+    }
+
+    fn tear_down(&self) -> VaultResult<()> {
+        todo!()
+    }
+
     fn attr(&self, file: Inode) -> VaultResult<FileInfo> {
         todo!()
     }
@@ -21,23 +29,19 @@ impl Vault for CachingVault {
         todo!()
     }
 
-    fn open(&self, file: Inode, mode: OpenMode) -> VaultResult<()> {
-        todo!()
-    }
-
-    fn setup(&self) -> VaultResult<()> {
-        todo!()
-    }
-
     fn write(&self, file: Inode, offset: i64, data: &[u8]) -> VaultResult<u32> {
         todo!()
     }
 
-    fn close(&self, file: Inode) -> VaultResult<()> {
+    fn create(&self, parent: Inode, name: &str, kind: VaultFileType) -> VaultResult<Inode> {
         todo!()
     }
 
-    fn create(&self, parent: Inode, name: &str, kind: VaultFileType) -> VaultResult<Inode> {
+    fn open(&self, file: Inode, mode: OpenMode) -> VaultResult<()> {
+        todo!()
+    }
+
+    fn close(&self, file: Inode) -> VaultResult<()> {
         todo!()
     }
 
@@ -46,10 +50,6 @@ impl Vault for CachingVault {
     }
 
     fn readdir(&self, dir: Inode) -> VaultResult<Vec<DirEntry>> {
-        todo!()
-    }
-
-    fn tear_down(&self) -> VaultResult<()> {
         todo!()
     }
 }
