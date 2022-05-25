@@ -1,6 +1,9 @@
 use clap::{Arg, Command};
 use fuser::{self, MountOption};
-use monovault::{database::Database, fuse::FS, local_vault::LocalVault, types::*};
+use monovault::{
+    fuse::FS, local_vault::LocalVault, remote_vault::RemoteVault, types::*,
+    vault_server::VaultServer,
+};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -35,8 +38,22 @@ fn main() {
         fs::create_dir(&db_path).expect("Cannot create directory for database");
     }
 
-    let local_vault = LocalVault::new(&config.local_vault_name, &db_path)
-        .expect("Cannot create local vault instance");
+    // Create vault instances.
+    let mut vaults: Vec<Arc<Mutex<Box<dyn Vault>>>> = vec![];
+    let local_vault: Arc<Mutex<Box<dyn Vault>>> = Arc::new(Mutex::new(Box::new(
+        LocalVault::new(&config.local_vault_name, &db_path)
+            .expect("Cannot create local vault instance"),
+    )));
+    vaults.push(Arc::clone(&local_vault));
+
+    for (peer_name, peer_address) in config.peers {
+        let remote_vault = RemoteVault::new(peer_address, &peer_name)
+            .expect("Cannot create remote vault instance");
+        vaults.push(Arc::new(Mutex::new(Box::new(remote_vault))));
+    }
+
+    // Run vault server.
+    let vault_server = VaultServer::new(Arc::clone(&local_vault));
 
     let options = vec![
         MountOption::FSName("monovault".to_string()),
@@ -50,6 +67,6 @@ fn main() {
         MountOption::CUSTOM("noapplexattr".to_string()),
         MountOption::CUSTOM("noappledouble".to_string()),
     ];
-    let fs = FS::new(vec![Box::new(local_vault)]);
+    let fs = FS::new(vaults);
     fuser::mount2(fs, &config.mount_point, &options).unwrap();
 }

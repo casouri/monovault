@@ -9,7 +9,7 @@ use log::{debug, error, info, warn};
 use std::boxed::Box;
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time;
 
 // The fuse layer does mainly two things: it translates between the
@@ -29,12 +29,14 @@ use std::time;
 pub struct FS {
     /// The order of the vaults in this vector cannot change for the
     /// duration of running.
-    vaults: Vec<Arc<Box<dyn Vault>>>,
+    vaults: Vec<Arc<Mutex<Box<dyn Vault>>>>,
     /// Maps inode to its belonging vault.
-    vault_map: HashMap<u64, Arc<Box<dyn Vault>>>,
+    vault_map: HashMap<u64, Arc<Mutex<Box<dyn Vault>>>>,
     /// The base inode for each vault.
     vault_base_map: HashMap<String, u64>,
 }
+
+type VaultLck = Arc<Mutex<Box<dyn Vault>>>;
 
 /// Return a dummy timestamp.
 fn ts() -> time::SystemTime {
@@ -103,17 +105,17 @@ fn translate_error(err: VaultError) -> libc::c_int {
 }
 
 impl FS {
-    pub fn new(vaults: Vec<Box<dyn Vault>>) -> FS {
+    pub fn new(vaults: Vec<VaultLck>) -> FS {
         let mut vault_map = HashMap::new();
         let mut vault_base_map = HashMap::new();
         let mut vault_refs = vec![];
         let mut base = 1;
-        for vault in vaults {
-            let vault_ref = Arc::new(vault);
+        for vault_lck in vaults {
+            let vault = vault_lck.lock().unwrap();
             let vault_base = base * (2 as u64).pow(48);
-            vault_base_map.insert(vault_ref.name(), vault_base);
-            vault_map.insert(1 + vault_base, Arc::clone(&vault_ref));
-            vault_refs.push(vault_ref);
+            vault_base_map.insert(vault.name(), vault_base);
+            vault_map.insert(1 + vault_base, Arc::clone(&vault_lck));
+            vault_refs.push(Arc::clone(&vault_lck));
             base += 1;
         }
         FS {
@@ -123,27 +125,28 @@ impl FS {
         }
     }
 
-    fn to_inner(&self, vault: &Box<dyn Vault>, file: Inode) -> Inode {
-        file - self.vault_base_map.get(&vault.name()).unwrap()
+    fn to_inner(&self, vault_name: &str, file: Inode) -> Inode {
+        file - self.vault_base_map.get(vault_name).unwrap()
     }
 
-    fn to_outer(&self, vault: &Box<dyn Vault>, file: Inode) -> Inode {
-        file + self.vault_base_map.get(&vault.name()).unwrap()
+    fn to_outer(&self, vault_name: &str, file: Inode) -> Inode {
+        file + self.vault_base_map.get(vault_name).unwrap()
     }
 
     fn readdir_vaults(&self) -> Vec<(Inode, String, FileType)> {
         let mut result = vec![];
         result.push((1, ".".to_string(), FileType::Directory));
         result.push((1, "..".to_string(), FileType::Directory));
-        for vault in &self.vaults {
-            let root_inode = self.to_outer(vault, 1);
+        for vault_lck in &self.vaults {
+            let vault = vault_lck.lock().unwrap();
+            let root_inode = self.to_outer(&vault.name(), 1);
             result.push((root_inode, vault.name(), FileType::Directory));
         }
         debug!("readdir_vaults: {:?}", &result);
         result
     }
 
-    fn get_vault(&self, inode: u64) -> VaultResult<Arc<Box<dyn Vault>>> {
+    fn get_vault(&self, inode: u64) -> VaultResult<VaultLck> {
         if let Some(vault) = self.vault_map.get(&inode) {
             Ok(Arc::clone(vault))
         } else {
@@ -163,9 +166,10 @@ impl FS {
                 version: 0,                     // -> TODO: track this
             })
         } else {
-            let vault = self.get_vault(_ino)?;
-            let mut info = vault.attr(self.to_inner(&vault, _ino))?;
-            info.inode = self.to_outer(&vault, info.inode);
+            let vault_lck = self.get_vault(_ino)?;
+            let vault = vault_lck.lock().unwrap();
+            let mut info = vault.attr(self.to_inner(&vault.name(), _ino))?;
+            info.inode = self.to_outer(&vault.name(), info.inode);
             Ok(info)
         }
     }
@@ -195,23 +199,25 @@ impl FS {
         _umask: u32,
         _flags: i32,
     ) -> VaultResult<u64> {
-        let vault = self.get_vault(parent)?;
+        let vault_lck = self.get_vault(parent)?;
+        let vault = vault_lck.lock().unwrap();
         let inode = self.to_outer(
-            &vault,
+            &vault.name(),
             vault.create(
-                self.to_inner(&vault, parent),
+                self.to_inner(&vault.name(), parent),
                 &name.to_string_lossy().into_owned(),
                 VaultFileType::File,
             )?,
         );
-        self.vault_map.insert(inode, Arc::clone(&vault));
+        self.vault_map.insert(inode, Arc::clone(&vault_lck));
         Ok(inode)
     }
 
     fn open_1(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32) -> VaultResult<()> {
-        let vault = self.get_vault(_ino)?;
+        let vault_lck = self.get_vault(_ino)?;
+        let vault = vault_lck.lock().unwrap();
         // TODO: open mode.
-        vault.open(self.to_inner(&vault, _ino), OpenMode::RW)
+        vault.open(self.to_inner(&vault.name(), _ino), OpenMode::RW)
     }
 
     fn release_1(
@@ -223,8 +229,9 @@ impl FS {
         _lock_owner: Option<u64>,
         _flush: bool,
     ) -> VaultResult<()> {
-        let vault = self.get_vault(_ino)?;
-        vault.close(self.to_inner(&vault, _ino))
+        let vault_lck = self.get_vault(_ino)?;
+        let vault = vault_lck.lock().unwrap();
+        vault.close(self.to_inner(&vault.name(), _ino))
     }
 
     fn read_1(
@@ -237,8 +244,9 @@ impl FS {
         _flags: i32,
         _lock_owner: Option<u64>,
     ) -> VaultResult<Vec<u8>> {
-        let vault = self.get_vault(ino)?;
-        vault.read(self.to_inner(&vault, ino), offset, size)
+        let vault_lck = self.get_vault(ino)?;
+        let vault = vault_lck.lock().unwrap();
+        vault.read(self.to_inner(&vault.name(), ino), offset, size)
     }
 
     fn write_1(
@@ -252,8 +260,9 @@ impl FS {
         _flags: i32,
         _lock_owner: Option<u64>,
     ) -> VaultResult<u32> {
-        let vault = self.get_vault(ino)?;
-        vault.write(self.to_inner(&vault, ino), offset, data)
+        let vault_lck = self.get_vault(ino)?;
+        let vault = vault_lck.lock().unwrap();
+        vault.write(self.to_inner(&vault.name(), ino), offset, data)
     }
 
     fn unlink_1(
@@ -278,13 +287,15 @@ impl FS {
                             }
                             (FileType::RegularFile, FileType::RegularFile) => {
                                 // Actually do the work.
-                                let vault = self.get_vault(inode)?;
-                                vault.delete(self.to_inner(&vault, inode))
+                                let vault_lck = self.get_vault(inode)?;
+                                let vault = vault_lck.lock().unwrap();
+                                vault.delete(self.to_inner(&vault.name(), inode))
                             }
                             (FileType::Directory, FileType::Directory) => {
                                 // Actually do the work.
-                                let vault = self.get_vault(inode)?;
-                                vault.delete(self.to_inner(&vault, inode))
+                                let vault_lck = self.get_vault(inode)?;
+                                let vault = vault_lck.lock().unwrap();
+                                vault.delete(self.to_inner(&vault.name(), inode))
                             }
                             // Other types are impossible.
                             _ => Ok(()),
@@ -306,14 +317,15 @@ impl FS {
         _mode: u32,
         _umask: u32,
     ) -> VaultResult<Inode> {
-        let vault = self.get_vault(parent)?;
+        let vault_lck = self.get_vault(parent)?;
+        let vault = vault_lck.lock().unwrap();
         let inode = vault.create(
-            self.to_inner(&vault, parent),
+            self.to_inner(&vault.name(), parent),
             &name.to_string_lossy().into_owned(),
             VaultFileType::Directory,
         )?;
-        let outer_inode = self.to_outer(&vault, inode);
-        self.vault_map.insert(outer_inode, Arc::clone(&vault));
+        let outer_inode = self.to_outer(&vault.name(), inode);
+        self.vault_map.insert(outer_inode, Arc::clone(&vault_lck));
         Ok(outer_inode)
     }
 
@@ -328,8 +340,9 @@ impl FS {
         if ino == 1 {
             return Ok(self.readdir_vaults());
         }
-        let vault = self.get_vault(ino)?;
-        let entries = vault.readdir(self.to_inner(&vault, ino))?;
+        let vault_lck = self.get_vault(ino)?;
+        let vault = vault_lck.lock().unwrap();
+        let entries = vault.readdir(self.to_inner(&vault.name(), ino))?;
         // Translate DirEntry to the tuple we return.
         let mut entries: Vec<(u64, String, FileType)> = entries
             .iter()
@@ -338,16 +351,16 @@ impl FS {
                 // When fuse starts up, it only has mappings for vault
                 // roots, so any newly discovered files need to be
                 // added to the map.
-                let outer_inode = self.to_outer(&vault, entry.inode);
+                let outer_inode = self.to_outer(&vault.name(), entry.inode);
                 if outer_inode != 1 {
-                    self.vault_map.insert(outer_inode, Arc::clone(&vault));
+                    self.vault_map.insert(outer_inode, Arc::clone(&vault_lck));
                 }
                 (outer_inode, entry.name.clone(), translate_kind(entry.kind))
             })
             .collect();
         // If the directory is vault root, we need to add parent dir
         // for it.
-        if self.to_inner(&vault, ino) == 1 {
+        if self.to_inner(&vault.name(), ino) == 1 {
             entries.push((1, "..".to_string(), FileType::Directory))
         }
         Ok(entries)
@@ -366,7 +379,8 @@ impl Filesystem for FS {
 
     fn destroy(&mut self) {
         info!("destroy()");
-        for vault in &self.vaults {
+        for vault_lck in &self.vaults {
+            let vault = vault_lck.lock().unwrap();
             match vault.tear_down() {
                 Ok(_) => (),
                 Err(err) => error!("destroy() => vault {} {:?}", vault.name(), err),

@@ -26,7 +26,7 @@ pub struct RemoteVault {
 }
 
 impl RemoteVault {
-    fn new(addr: String, name: &str) -> VaultResult<RemoteVault> {
+    pub fn new(addr: String, name: &str) -> VaultResult<RemoteVault> {
         let rt = Builder::new_multi_thread().enable_all().build().unwrap();
         let client = rt.block_on(VaultRpcClient::connect(addr))?;
         return Ok(RemoteVault {

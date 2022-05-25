@@ -94,7 +94,7 @@ impl From<tonic::transport::Error> for VaultError {
 }
 
 /// A generic vault, can be either a local vault or a remote vault.
-pub trait Vault {
+pub trait Vault: Send {
     /// Return the name of the vault.
     fn name(&self) -> String;
     fn setup(&self) -> VaultResult<()> {

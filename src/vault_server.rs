@@ -1,6 +1,5 @@
 // A gRPC server that receives requests and uses local_vault to do the
 // actual work.
-use crate::local_vault::LocalVault;
 use crate::rpc::vault_rpc_server::VaultRpc;
 use crate::rpc::{
     DataChunk, DirEntryList, Empty, FileInfo, FileToCreate, FileToOpen, FileToRead, FileToWrite,
@@ -8,13 +7,15 @@ use crate::rpc::{
 };
 use crate::types::{OpenMode, Vault, VaultFileType};
 use async_trait::async_trait;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-struct VaultServer {
-    local_vault: LocalVault,
+pub struct VaultServer {
+    local_vault: Arc<Mutex<Box<dyn Vault>>>,
 }
+
 fn kind2num(v: VaultFileType) -> i32 {
     let k = match v {
         VaultFileType::File => 1,
@@ -29,10 +30,21 @@ fn num2kind(k: i32) -> VaultFileType {
         return VaultFileType::Directory;
     }
 }
+
+impl VaultServer {
+    pub fn new(local_vault: Arc<Mutex<Box<dyn Vault>>>) -> VaultServer {
+        VaultServer { local_vault }
+    }
+}
+
 #[async_trait]
 impl VaultRpc for VaultServer {
     async fn attr(&self, request: Request<Inode>) -> Result<Response<FileInfo>, Status> {
-        let res = self.local_vault.attr(request.into_inner().value);
+        let res = self
+            .local_vault
+            .lock()
+            .unwrap()
+            .attr(request.into_inner().value);
         match res {
             Ok(v) => Ok(Response::new(FileInfo {
                 inode: v.inode,
@@ -54,6 +66,8 @@ impl VaultRpc for VaultServer {
         let request_inner = request.into_inner();
         let res = self
             .local_vault
+            .lock()
+            .unwrap()
             .read(request_inner.file, request_inner.offset, request_inner.size)
             .unwrap();
         let (tx, rx) = mpsc::channel(4);
@@ -74,7 +88,11 @@ impl VaultRpc for VaultServer {
         let mut size = 0;
 
         while let Some(file) = stream.message().await? {
-            let res = self.local_vault.write(file.name, file.offset, &file.data);
+            let res = self
+                .local_vault
+                .lock()
+                .unwrap()
+                .write(file.name, file.offset, &file.data);
             match res {
                 Ok(v) => size += v,
                 Err(_) => return Err(Status::unknown("Function write in VaultServer failed!")),
@@ -84,7 +102,7 @@ impl VaultRpc for VaultServer {
     }
     async fn create(&self, request: Request<FileToCreate>) -> Result<Response<Inode>, Status> {
         let request_inner = request.into_inner();
-        let res = self.local_vault.create(
+        let res = self.local_vault.lock().unwrap().create(
             request_inner.parent,
             request_inner.name.as_str(),
             num2kind(request_inner.kind),
@@ -100,28 +118,44 @@ impl VaultRpc for VaultServer {
             0 => OpenMode::R,
             _option => OpenMode::RW,
         };
-        let res = self.local_vault.open(request_inner.file, mode);
+        let res = self
+            .local_vault
+            .lock()
+            .unwrap()
+            .open(request_inner.file, mode);
         match res {
             Ok(v) => Ok(Response::new(Empty {})),
             Err(_) => Err(Status::unknown("Function open in VaultServer failed!")),
         }
     }
     async fn close(&self, request: Request<Inode>) -> Result<Response<Empty>, Status> {
-        let res = self.local_vault.close(request.into_inner().value);
+        let res = self
+            .local_vault
+            .lock()
+            .unwrap()
+            .close(request.into_inner().value);
         match res {
             Ok(v) => Ok(Response::new(Empty {})),
             Err(_) => Err(Status::unknown("Function close in VaultServer failed!")),
         }
     }
     async fn delete(&self, request: Request<Inode>) -> Result<Response<Empty>, Status> {
-        let res = self.local_vault.delete(request.into_inner().value);
+        let res = self
+            .local_vault
+            .lock()
+            .unwrap()
+            .delete(request.into_inner().value);
         match res {
             Ok(v) => Ok(Response::new(Empty {})),
             Err(_) => Err(Status::unknown("Function delete in VaultServer failed!")),
         }
     }
     async fn readdir(&self, request: Request<Inode>) -> Result<Response<DirEntryList>, Status> {
-        let res = self.local_vault.readdir(request.into_inner().value);
+        let res = self
+            .local_vault
+            .lock()
+            .unwrap()
+            .readdir(request.into_inner().value);
         match res {
             Ok(v) => Ok(Response::new(DirEntryList {
                 list: v
