@@ -13,6 +13,9 @@ use std::sync::{
 };
 use std::time;
 
+// TODO: modifying file currently doesn't update mtime and version of
+// ancestor directories.
+
 #[derive(Debug)]
 pub struct RefCounter {
     ref_count: Mutex<HashMap<Inode, u64>>,
@@ -87,7 +90,9 @@ pub struct LocalVault {
     data_file_dir: PathBuf,
     /// Database for metadata.
     database: Mutex<Database>,
-    /// Maps inode to file handlers.
+    /// Maps inode to file handlers. DO NOT store references of fd's
+    /// in other places, when the fd is removed from this map, we
+    /// expect it to be dropped and the file closed.
     fd_map: Mutex<HashMap<Inode, Arc<Mutex<File>>>>,
     /// Counts the number of references to each file, when ref count
     /// of that file reaches 0, the file handler can be closed, and
@@ -146,18 +151,22 @@ impl LocalVault {
     }
 
     /// Open and get the file handler for `file`. `file` is created if
-    /// not already exists.
+    /// not already exists. When this function returns successfuly,
+    /// the data file must exist on disk (and `check_data_file_exists`
+    /// returns true).
     fn get_file(&self, file: Inode) -> VaultResult<Arc<Mutex<File>>> {
         let mut map = self.fd_map.lock().unwrap();
         match map.get(&file) {
             Some(fd) => Ok(Arc::clone(fd)),
             None => {
                 info!("get_file, path={:?}", self.compose_path(file));
-                let fd = OpenOptions::new()
+                let mut fd = OpenOptions::new()
                     .create(true)
                     .read(true)
                     .write(true)
                     .open(self.compose_path(file))?;
+                // Make sure file exists on disk.
+                fd.flush()?;
                 let fdref = Arc::new(Mutex::new(fd));
                 map.insert(file, Arc::clone(&fdref));
                 Ok(fdref)
@@ -181,13 +190,6 @@ impl LocalVault {
         } else {
             Err(VaultError::FileNotExist(file))
         }
-    }
-
-    /// Copy `file` to `path`.
-    pub fn copy_file(&self, file: Inode, path: &Path) -> VaultResult<u64> {
-        let from_path = self.compose_path(file);
-        let size = std::fs::copy(&from_path, path)?;
-        Ok(size)
     }
 }
 
@@ -387,16 +389,43 @@ impl Vault for LocalVault {
     }
 }
 
-impl VaultCache for LocalVault {
-    fn pull_meta(&self, source: &Box<dyn Vault>, file: Inode) -> VaultResult<FileInfo> {
-        todo!()
+/// Caching functions
+
+impl LocalVault {
+    /// Copy `file` to `path`.
+    pub fn copy_file(&self, file: Inode, path: &Path) -> VaultResult<u64> {
+        let from_path = self.compose_path(file);
+        let size = std::fs::copy(&from_path, path)?;
+        Ok(size)
     }
 
-    fn pull_data(&self, source: &Box<dyn Vault>, file: Inode) -> VaultResult<Vec<u8>> {
-        todo!()
+    // Create data file and meta data for `child`. Set `version` to 0
+    // so content is fetched on open. This function should only be
+    // called when `child` does not exist.
+    pub fn cache_add_file(
+        &self,
+        parent: Inode,
+        child: Inode,
+        name: &str,
+        kind: VaultFileType,
+        atime: u64,
+        mtime: u64,
+        version: u64,
+    ) -> VaultResult<()> {
+        self.get_file(child)?;
+        self.database
+            .lock()
+            .unwrap()
+            .add_file(parent, child, name, kind, atime, mtime, version)
     }
 
-    fn push_data(&self, dest: &Box<dyn Vault>, file: Inode, data_file: &Path) -> VaultResult<()> {
-        todo!()
+    /// Return true if the file exists in the vault.
+    pub fn cache_has_file(&self, file: Inode) -> VaultResult<bool> {
+        // Invariant: if meta exists, data file must exist.
+        match self.attr(file) {
+            Ok(_) => Ok(true),
+            Err(VaultError::FileNotExist(_)) => Ok(false),
+            Err(err) => Err(err),
+        }
     }
 }

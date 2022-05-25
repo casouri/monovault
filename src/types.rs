@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::boxed::Box;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
+use std::path::Path;
 use std::time;
 
 pub type VaultName = String;
@@ -113,10 +114,4 @@ pub trait Vault {
     /// List directory entries of `dir`. The listing includes "." and
     /// "..", but if `dir` is vault root, ".." is not included.
     fn readdir(&self, dir: Inode) -> VaultResult<Vec<FileInfo>>;
-}
-
-pub trait VaultCache {
-    fn pull_meta(&self, source: &Box<dyn Vault>, file: Inode) -> VaultResult<FileInfo>;
-    fn pull_data(&self, source: &Box<dyn Vault>, file: Inode) -> VaultResult<Vec<u8>>;
-    fn push_data(&self, dest: &Box<dyn Vault>, file: Inode, data: &[u8]) -> VaultResult<()>;
 }
