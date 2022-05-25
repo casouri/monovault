@@ -60,6 +60,7 @@ pub enum VaultError {
     MarshallError(serde_json::Error),
     SystemTimeError(time::SystemTimeError),
     IOError(std::io::Error),
+    RpcError(tonic::transport::Error),
 }
 
 impl From<rusqlite::Error> for VaultError {
@@ -83,6 +84,12 @@ impl From<std::io::Error> for VaultError {
 impl From<time::SystemTimeError> for VaultError {
     fn from(err: time::SystemTimeError) -> Self {
         VaultError::SystemTimeError(err)
+    }
+}
+
+impl From<tonic::transport::Error> for VaultError {
+    fn from(err: tonic::transport::Error) -> Self {
+        VaultError::RpcError(err)
     }
 }
 
