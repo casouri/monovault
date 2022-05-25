@@ -228,7 +228,7 @@ impl Database {
     pub fn readdir(&mut self, file: Inode) -> VaultResult<(Inode, Inode, Vec<Inode>)> {
         // let mut result = vec![];
         // Get each entry from the database.
-        let mut children = {
+        let children = {
             let mut statment = self
                 .db
                 .prepare("select child from HasChild where parent=?")?;
