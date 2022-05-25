@@ -374,10 +374,15 @@ impl Vault for LocalVault {
         for file in entries {
             result.push(self.attr(file)?)
         }
-        result.push(self.attr(this)?);
+        let mut current_dir = self.attr(this)?;
+        current_dir.name = ".".to_string();
+        result.push(current_dir);
         if parent != 0 {
-            result.push(self.attr(parent)?);
+            let mut parrent_dir = self.attr(parent)?;
+            parrent_dir.name = "..".to_string();
+            result.push(parrent_dir);
         }
+        debug!("readdir(dir={}) => {:?}", dir, &result);
         Ok(result)
     }
 }

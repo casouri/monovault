@@ -240,10 +240,6 @@ impl Database {
             children
         };
         info!("readdir({}) => {:?}", file, children);
-        // Add itself.
-        children.push(file);
-        // Add parent unless FILE is the root dir, in which case
-        // parent is added for us by fuse.
         let parent = if file != 1 {
             self.db
                 .query_row("select parent from HasChild where child=?", [file], |row| {
