@@ -167,8 +167,9 @@ impl FS {
             })
         } else {
             let vault_lck = self.get_vault(_ino)?;
-            let vault = vault_lck.lock().unwrap();
-            let mut info = vault.attr(self.to_inner(&vault.name(), _ino))?;
+            let mut vault = vault_lck.lock().unwrap();
+            let vault_name = vault.name();
+            let mut info = vault.attr(self.to_inner(&vault_name, _ino))?;
             info.inode = self.to_outer(&vault.name(), info.inode);
             Ok(info)
         }
@@ -200,11 +201,12 @@ impl FS {
         _flags: i32,
     ) -> VaultResult<u64> {
         let vault_lck = self.get_vault(parent)?;
-        let vault = vault_lck.lock().unwrap();
+        let mut vault = vault_lck.lock().unwrap();
+        let vault_name = vault.name();
         let inode = self.to_outer(
-            &vault.name(),
+            &vault_name,
             vault.create(
-                self.to_inner(&vault.name(), parent),
+                self.to_inner(&vault_name, parent),
                 &name.to_string_lossy().into_owned(),
                 VaultFileType::File,
             )?,
@@ -215,9 +217,10 @@ impl FS {
 
     fn open_1(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32) -> VaultResult<()> {
         let vault_lck = self.get_vault(_ino)?;
-        let vault = vault_lck.lock().unwrap();
+        let mut vault = vault_lck.lock().unwrap();
+        let vault_name = vault.name();
         // TODO: open mode.
-        vault.open(self.to_inner(&vault.name(), _ino), OpenMode::RW)
+        vault.open(self.to_inner(&vault_name, _ino), OpenMode::RW)
     }
 
     fn release_1(
@@ -230,8 +233,9 @@ impl FS {
         _flush: bool,
     ) -> VaultResult<()> {
         let vault_lck = self.get_vault(_ino)?;
-        let vault = vault_lck.lock().unwrap();
-        vault.close(self.to_inner(&vault.name(), _ino))
+        let mut vault = vault_lck.lock().unwrap();
+        let vault_name = vault.name();
+        vault.close(self.to_inner(&vault_name, _ino))
     }
 
     fn read_1(
@@ -245,8 +249,9 @@ impl FS {
         _lock_owner: Option<u64>,
     ) -> VaultResult<Vec<u8>> {
         let vault_lck = self.get_vault(ino)?;
-        let vault = vault_lck.lock().unwrap();
-        vault.read(self.to_inner(&vault.name(), ino), offset, size)
+        let mut vault = vault_lck.lock().unwrap();
+        let vault_name = vault.name();
+        vault.read(self.to_inner(&vault_name, ino), offset, size)
     }
 
     fn write_1(
@@ -261,8 +266,9 @@ impl FS {
         _lock_owner: Option<u64>,
     ) -> VaultResult<u32> {
         let vault_lck = self.get_vault(ino)?;
-        let vault = vault_lck.lock().unwrap();
-        vault.write(self.to_inner(&vault.name(), ino), offset, data)
+        let mut vault = vault_lck.lock().unwrap();
+        let vault_name = vault.name();
+        vault.write(self.to_inner(&vault_name, ino), offset, data)
     }
 
     fn unlink_1(
@@ -288,14 +294,16 @@ impl FS {
                             (FileType::RegularFile, FileType::RegularFile) => {
                                 // Actually do the work.
                                 let vault_lck = self.get_vault(inode)?;
-                                let vault = vault_lck.lock().unwrap();
-                                vault.delete(self.to_inner(&vault.name(), inode))
+                                let mut vault = vault_lck.lock().unwrap();
+                                let vault_name = vault.name();
+                                vault.delete(self.to_inner(&vault_name, inode))
                             }
                             (FileType::Directory, FileType::Directory) => {
                                 // Actually do the work.
                                 let vault_lck = self.get_vault(inode)?;
-                                let vault = vault_lck.lock().unwrap();
-                                vault.delete(self.to_inner(&vault.name(), inode))
+                                let mut vault = vault_lck.lock().unwrap();
+                                let vault_name = vault.name();
+                                vault.delete(self.to_inner(&vault_name, inode))
                             }
                             // Other types are impossible.
                             _ => Ok(()),
@@ -318,9 +326,10 @@ impl FS {
         _umask: u32,
     ) -> VaultResult<Inode> {
         let vault_lck = self.get_vault(parent)?;
-        let vault = vault_lck.lock().unwrap();
+        let mut vault = vault_lck.lock().unwrap();
+        let vault_name = vault.name();
         let inode = vault.create(
-            self.to_inner(&vault.name(), parent),
+            self.to_inner(&vault_name, parent),
             &name.to_string_lossy().into_owned(),
             VaultFileType::Directory,
         )?;
@@ -341,8 +350,9 @@ impl FS {
             return Ok(self.readdir_vaults());
         }
         let vault_lck = self.get_vault(ino)?;
-        let vault = vault_lck.lock().unwrap();
-        let entries = vault.readdir(self.to_inner(&vault.name(), ino))?;
+        let mut vault = vault_lck.lock().unwrap();
+        let name = vault.name();
+        let entries = vault.readdir(self.to_inner(&name, ino))?;
         // Translate DirEntry to the tuple we return.
         let mut entries: Vec<(u64, String, FileType)> = entries
             .iter()
@@ -380,7 +390,7 @@ impl Filesystem for FS {
     fn destroy(&mut self) {
         info!("destroy()");
         for vault_lck in &self.vaults {
-            let vault = vault_lck.lock().unwrap();
+            let mut vault = vault_lck.lock().unwrap();
             match vault.tear_down() {
                 Ok(_) => (),
                 Err(err) => error!("destroy() => vault {} {:?}", vault.name(), err),

@@ -89,11 +89,11 @@ pub struct LocalVault {
     name: String,
     data_file_dir: PathBuf,
     /// Database for metadata.
-    database: Mutex<Database>,
+    database: Database,
     /// Maps inode to file handlers. DO NOT store references of fd's
     /// in other places, when the fd is removed from this map, we
     /// expect it to be dropped and the file closed.
-    fd_map: Mutex<HashMap<Inode, Arc<Mutex<File>>>>,
+    fd_map: HashMap<Inode, Arc<Mutex<File>>>,
     /// Counts the number of references to each file, when ref count
     /// of that file reaches 0, the file handler can be closed, and
     /// the file can be deleted from disk (if requested).
@@ -103,7 +103,7 @@ pub struct LocalVault {
     /// The next allocated inode is current_inode + 1.
     current_inode: AtomicU64,
     /// Files waiting to be deleted.
-    pending_delete: Mutex<Vec<Inode>>,
+    pending_delete: Vec<Inode>,
 }
 
 impl LocalVault {
@@ -126,12 +126,12 @@ impl LocalVault {
         Ok(LocalVault {
             name: name.to_string(),
             data_file_dir,
-            database: Mutex::new(database),
-            fd_map: Mutex::new(HashMap::new()),
+            database,
+            fd_map: HashMap::new(),
             ref_count: RefCounter::new(),
             mod_track: RefCounter::new(),
             current_inode: AtomicU64::new(current_inode),
-            pending_delete: Mutex::new(vec![]),
+            pending_delete: vec![],
         })
     }
 
@@ -154,9 +154,9 @@ impl LocalVault {
     /// not already exists. When this function returns successfuly,
     /// the data file must exist on disk (and `check_data_file_exists`
     /// returns true).
-    fn get_file(&self, file: Inode) -> VaultResult<Arc<Mutex<File>>> {
-        let mut map = self.fd_map.lock().unwrap();
-        match map.get(&file) {
+    fn get_file(&mut self, file: Inode) -> VaultResult<Arc<Mutex<File>>> {
+        let ret = self.fd_map.get(&file);
+        match ret {
             Some(fd) => Ok(Arc::clone(fd)),
             None => {
                 info!("get_file, path={:?}", self.compose_path(file));
@@ -168,14 +168,14 @@ impl LocalVault {
                 // Make sure file exists on disk.
                 fd.flush()?;
                 let fdref = Arc::new(Mutex::new(fd));
-                map.insert(file, Arc::clone(&fdref));
+                self.fd_map.insert(file, Arc::clone(&fdref));
                 Ok(fdref)
             }
         }
     }
 
     fn check_is_regular_file(&self, file: Inode) -> VaultResult<()> {
-        let kind = self.database.lock().unwrap().attr(file)?.kind;
+        let kind = self.database.attr(file)?.kind;
         match kind {
             VaultFileType::File => Ok(()),
             VaultFileType::Directory => Err(VaultError::IsDirectory(file)),
@@ -198,18 +198,18 @@ impl Vault for LocalVault {
         self.name.clone()
     }
 
-    fn tear_down(&self) -> VaultResult<()> {
+    fn tear_down(&mut self) -> VaultResult<()> {
         info!("tear_down()");
-        let queue = self.pending_delete.lock().unwrap();
+        let queue = &self.pending_delete;
         for &file in queue.iter() {
             std::fs::remove_file(self.compose_path(file))?;
         }
         Ok(())
     }
 
-    fn attr(&self, file: Inode) -> VaultResult<FileInfo> {
+    fn attr(&mut self, file: Inode) -> VaultResult<FileInfo> {
         debug!("attr(file={})", file);
-        let mut info = self.database.lock().unwrap().attr(file)?;
+        let mut info = self.database.attr(file)?;
         let size = match info.kind {
             VaultFileType::File => {
                 let meta = std::fs::metadata(self.compose_path(file))?;
@@ -221,7 +221,7 @@ impl Vault for LocalVault {
         Ok(info)
     }
 
-    fn read(&self, file: Inode, offset: i64, size: u32) -> VaultResult<Vec<u8>> {
+    fn read(&mut self, file: Inode, offset: i64, size: u32) -> VaultResult<Vec<u8>> {
         info!("read(file={}, offset={}, size={})", file, offset, size);
         // We don't access database during read because delete() will
         // remove the file from the database but before the last
@@ -248,7 +248,7 @@ impl Vault for LocalVault {
         }
     }
 
-    fn write(&self, file: Inode, offset: i64, data: &[u8]) -> VaultResult<u32> {
+    fn write(&mut self, file: Inode, offset: i64, data: &[u8]) -> VaultResult<u32> {
         info!("write(file={}, offset={})", file, offset);
         // We don't access database during write because delete() will
         // remove the file from the database but before the last
@@ -264,7 +264,7 @@ impl Vault for LocalVault {
         Ok(size as u32)
     }
 
-    fn create(&self, parent: Inode, name: &str, kind: VaultFileType) -> VaultResult<Inode> {
+    fn create(&mut self, parent: Inode, name: &str, kind: VaultFileType) -> VaultResult<Inode> {
         info!("create(parent={}, name={}, kind={:?})", parent, name, kind);
         let inode = self.new_inode();
         // In fuse semantics (and thus vault's) create also open the
@@ -281,21 +281,14 @@ impl Vault for LocalVault {
         let current_time = time::SystemTime::now()
             .duration_since(time::UNIX_EPOCH)?
             .as_secs();
-        self.database.lock().unwrap().add_file(
-            parent,
-            inode,
-            name,
-            kind,
-            current_time,
-            current_time,
-            1,
-        )?;
+        self.database
+            .add_file(parent, inode, name, kind, current_time, current_time, 1)?;
         self.ref_count.incf(inode)?;
         info!("created {}", inode);
         Ok(inode)
     }
 
-    fn open(&self, file: Inode, mode: OpenMode) -> VaultResult<()> {
+    fn open(&mut self, file: Inode, mode: OpenMode) -> VaultResult<()> {
         info!("open(file={})", file);
         self.check_is_regular_file(file)?;
         self.check_data_file_exists(file)?;
@@ -303,7 +296,7 @@ impl Vault for LocalVault {
         Ok(())
     }
 
-    fn close(&self, file: Inode) -> VaultResult<()> {
+    fn close(&mut self, file: Inode) -> VaultResult<()> {
         info!("close(file={})", file);
         // We don't access database during write because delete() will
         // remove the file from the database but before the last
@@ -314,7 +307,7 @@ impl Vault for LocalVault {
         self.check_data_file_exists(file)?;
         let count = self.ref_count.decf(file)?;
         if count == 0 {
-            let mut map = self.fd_map.lock().unwrap();
+            let map = &mut self.fd_map;
             // When the file is dropped it is automatically closed. We
             // never store the file elsewhere and ref_count is 0 so
             // this is when the file is dropped.
@@ -325,10 +318,8 @@ impl Vault for LocalVault {
                 .duration_since(time::UNIX_EPOCH)?
                 .as_secs();
             let modified = self.mod_track.nonzero(file);
-            // We hold the lock when retrieving version and setting it.
-            let mut db_lock = self.database.lock().unwrap();
-            let version = db_lock.attr(file)?.version;
-            db_lock.set_attr(
+            let version = self.database.attr(file)?.version;
+            self.database.set_attr(
                 file,
                 None,
                 Some(current_time),
@@ -339,13 +330,13 @@ impl Vault for LocalVault {
         Ok(())
     }
 
-    fn delete(&self, file: Inode) -> VaultResult<()> {
+    fn delete(&mut self, file: Inode) -> VaultResult<()> {
         info!("delete(file={})", file);
         // Prefetch kind and store it, because we won't be able to
         // get it after deleting the file.
-        let kind = self.database.lock().unwrap().attr(file)?.kind;
+        let kind = self.database.attr(file)?.kind;
         // Database will check for nonempty directory for us.
-        self.database.lock().unwrap().remove_file(file)?;
+        self.database.remove_file(file)?;
         // NOTE: Make sure we remove metadata before removing data
         // file, to ensure consistency.
         match kind {
@@ -356,7 +347,7 @@ impl Vault for LocalVault {
                 } else {
                     // If there are other references to the file,
                     // don't delete yet.
-                    let mut queue = self.pending_delete.lock().unwrap();
+                    let queue = &mut self.pending_delete;
                     if !queue.contains(&file) {
                         queue.push(file)
                     }
@@ -367,9 +358,9 @@ impl Vault for LocalVault {
         Ok(())
     }
 
-    fn readdir(&self, dir: Inode) -> VaultResult<Vec<FileInfo>> {
+    fn readdir(&mut self, dir: Inode) -> VaultResult<Vec<FileInfo>> {
         info!("readdir(dir={})", dir);
-        let (this, parent, entries) = self.database.lock().unwrap().readdir(dir)?;
+        let (this, parent, entries) = self.database.readdir(dir)?;
         let mut result = vec![];
         for file in entries {
             result.push(self.attr(file)?)
@@ -401,7 +392,7 @@ impl LocalVault {
     // so content is fetched on open. This function should only be
     // called when `child` does not exist.
     pub fn cache_add_file(
-        &self,
+        &mut self,
         parent: Inode,
         child: Inode,
         name: &str,
@@ -412,13 +403,11 @@ impl LocalVault {
     ) -> VaultResult<()> {
         self.get_file(child)?;
         self.database
-            .lock()
-            .unwrap()
             .add_file(parent, child, name, kind, atime, mtime, version)
     }
 
     /// Return true if the file exists in the vault.
-    pub fn cache_has_file(&self, file: Inode) -> VaultResult<bool> {
+    pub fn cache_has_file(&mut self, file: Inode) -> VaultResult<bool> {
         // Invariant: if meta exists, data file must exist.
         match self.attr(file) {
             Ok(_) => Ok(true),

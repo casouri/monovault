@@ -78,7 +78,7 @@ impl Database {
     }
 
     /// Return the largest inode recorded in the database.
-    pub fn largest_inode(&mut self) -> Inode {
+    pub fn largest_inode(&self) -> Inode {
         match self.db.query_row(
             "select child from HasChild order by child desc",
             [],
@@ -91,7 +91,7 @@ impl Database {
 
     /// Return attributes of `file`. The `size` field is a dummy value
     /// and needs to be filled.
-    pub fn attr(&mut self, file: Inode) -> VaultResult<FileInfo> {
+    pub fn attr(&self, file: Inode) -> VaultResult<FileInfo> {
         let entry = self.db.query_row(
             "select name, type, atime, mtime, version from Type where file=?",
             [file],
@@ -225,7 +225,7 @@ impl Database {
     /// element is inode for ".", second for "..", third a vector of
     /// children. If `file` is the vault root, we don't know "..", so
     /// the second element will be 0.
-    pub fn readdir(&mut self, file: Inode) -> VaultResult<(Inode, Inode, Vec<Inode>)> {
+    pub fn readdir(&self, file: Inode) -> VaultResult<(Inode, Inode, Vec<Inode>)> {
         // let mut result = vec![];
         // Get each entry from the database.
         let children = {

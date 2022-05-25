@@ -97,28 +97,28 @@ impl From<tonic::transport::Error> for VaultError {
 pub trait Vault: Send {
     /// Return the name of the vault.
     fn name(&self) -> String;
-    fn setup(&self) -> VaultResult<()> {
+    fn setup(&mut self) -> VaultResult<()> {
         Ok(())
     }
-    fn tear_down(&self) -> VaultResult<()> {
+    fn tear_down(&mut self) -> VaultResult<()> {
         Ok(())
     }
-    fn attr(&self, file: Inode) -> VaultResult<FileInfo>;
+    fn attr(&mut self, file: Inode) -> VaultResult<FileInfo>;
     /// Read `file` from `offset`, reads `size` bytes. If there aren't
     /// enough bytes to read, read to EOF.
-    fn read(&self, file: Inode, offset: i64, size: u32) -> VaultResult<Vec<u8>>;
+    fn read(&mut self, file: Inode, offset: i64, size: u32) -> VaultResult<Vec<u8>>;
     /// Write `data` into `file` at `offset`.
-    fn write(&self, file: Inode, offset: i64, data: &[u8]) -> VaultResult<u32>;
+    fn write(&mut self, file: Inode, offset: i64, data: &[u8]) -> VaultResult<u32>;
     /// Create a file or directory under `parent` with `name` and open
     /// it. Return its inode.
-    fn create(&self, parent: Inode, name: &str, kind: VaultFileType) -> VaultResult<Inode>;
+    fn create(&mut self, parent: Inode, name: &str, kind: VaultFileType) -> VaultResult<Inode>;
     /// Open `file`. `mod` is currently unused. `file` should be a regular file.
-    fn open(&self, file: Inode, mode: OpenMode) -> VaultResult<()>;
+    fn open(&mut self, file: Inode, mode: OpenMode) -> VaultResult<()>;
     /// Close `file`. `file` should be a regular file.
-    fn close(&self, file: Inode) -> VaultResult<()>;
+    fn close(&mut self, file: Inode) -> VaultResult<()>;
     /// Delete `file`. `file` can a regular file or a directory.
-    fn delete(&self, file: Inode) -> VaultResult<()>;
+    fn delete(&mut self, file: Inode) -> VaultResult<()>;
     /// List directory entries of `dir`. The listing includes "." and
     /// "..", but if `dir` is vault root, ".." is not included.
-    fn readdir(&self, dir: Inode) -> VaultResult<Vec<FileInfo>>;
+    fn readdir(&mut self, dir: Inode) -> VaultResult<Vec<FileInfo>>;
 }

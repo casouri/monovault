@@ -2,24 +2,19 @@
 
 use crate::rpc;
 use crate::rpc::vault_rpc_client::VaultRpcClient;
+use crate::rpc::FileToWrite;
 use crate::types::VaultFileType::Directory;
 use crate::types::VaultFileType::File;
 use crate::types::*;
-use crate::{database::Database, rpc::FileToWrite};
 use futures_util::stream;
-use std::fs::OpenOptions;
-use std::path::Path;
-use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::runtime::{Builder, Runtime};
-use tokio_stream::iter;
 use tokio_stream::StreamExt;
 use tonic::transport::Channel;
 use tonic::Request;
 
 #[derive(Debug)]
 pub struct RemoteVault {
-    // database: Arc<Database>,
     rt: Mutex<Runtime>,
     client: Mutex<VaultRpcClient<Channel>>,
     name: String,
@@ -42,7 +37,7 @@ impl Vault for RemoteVault {
         return self.name.clone();
     }
 
-    fn attr(&self, file: Inode) -> VaultResult<FileInfo> {
+    fn attr(&mut self, file: Inode) -> VaultResult<FileInfo> {
         let rt = self.rt.lock().unwrap();
         let mut client = self.client.lock().unwrap();
         let response = rt.block_on(client.attr(rpc::Inode { value: file }));
@@ -70,7 +65,7 @@ impl Vault for RemoteVault {
         }
     }
 
-    fn read(&self, file: Inode, offset: i64, size: u32) -> VaultResult<Vec<u8>> {
+    fn read(&mut self, file: Inode, offset: i64, size: u32) -> VaultResult<Vec<u8>> {
         let mut result: Vec<u8> = Vec::new();
         let rt = self.rt.lock().unwrap();
         let mut client = self.client.lock().unwrap();
@@ -99,7 +94,7 @@ impl Vault for RemoteVault {
         }
     }
 
-    fn write(&self, file: Inode, offset: i64, data: &[u8]) -> VaultResult<u32> {
+    fn write(&mut self, file: Inode, offset: i64, data: &[u8]) -> VaultResult<u32> {
         let rt = self.rt.lock().unwrap();
         let mut client = self.client.lock().unwrap();
         let mut file2write = vec![];
@@ -113,7 +108,7 @@ impl Vault for RemoteVault {
         Ok(response.into_inner().value)
     }
 
-    fn create(&self, parent: Inode, name: &str, kind: VaultFileType) -> VaultResult<Inode> {
+    fn create(&mut self, parent: Inode, name: &str, kind: VaultFileType) -> VaultResult<Inode> {
         let rt = self.rt.lock().unwrap();
         let mut client = self.client.lock().unwrap();
         let mut request = rpc::FileToCreate {
@@ -128,7 +123,7 @@ impl Vault for RemoteVault {
         return Ok(response.value);
     }
 
-    fn open(&self, file: Inode, mode: OpenMode) -> VaultResult<()> {
+    fn open(&mut self, file: Inode, mode: OpenMode) -> VaultResult<()> {
         let rt = self.rt.lock().unwrap();
         let mut client = self.client.lock().unwrap();
         let mut request = rpc::FileToOpen {
@@ -142,7 +137,7 @@ impl Vault for RemoteVault {
         return Ok(());
     }
 
-    fn close(&self, file: Inode) -> VaultResult<()> {
+    fn close(&mut self, file: Inode) -> VaultResult<()> {
         let rt = self.rt.lock().unwrap();
         let mut client = self.client.lock().unwrap();
         let _ = rt
@@ -152,7 +147,7 @@ impl Vault for RemoteVault {
         return Ok(());
     }
 
-    fn delete(&self, file: Inode) -> VaultResult<()> {
+    fn delete(&mut self, file: Inode) -> VaultResult<()> {
         let rt = self.rt.lock().unwrap();
         let mut client = self.client.lock().unwrap();
         let _ = rt
@@ -162,7 +157,7 @@ impl Vault for RemoteVault {
         return Ok(());
     }
 
-    fn readdir(&self, dir: Inode) -> VaultResult<Vec<FileInfo>> {
+    fn readdir(&mut self, dir: Inode) -> VaultResult<Vec<FileInfo>> {
         let rt = self.rt.lock().unwrap();
         let mut client = self.client.lock().unwrap();
         let response = rt
