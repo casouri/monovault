@@ -36,7 +36,7 @@ message DirEntryList {
 }
 
 message FileToRead {
-  uint64 name = 1;
+  uint64 file = 1;
   int64 offset = 2;
   uint32 size = 3;
 }
@@ -46,7 +46,6 @@ message FileToWrite {
   int64 offset = 2;
   bytes data = 3;
 }
-
 
 message FileToCreate {
   uint64 parent = 1;
