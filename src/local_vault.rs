@@ -316,28 +316,26 @@ impl Vault for LocalVault {
         if count == 0 {
             let mut map = self.fd_map.lock().unwrap();
             // When the file is dropped it is automatically closed. We
-            // never store the file else where so this is when the
-            // file is dropped (unless a concurrent read/write is
-            // using it, but after the function ends it is dropped,
-            // even that shouldn't be possible since ref count is 0
-            // now).
+            // never store the file elsewhere and ref_count is 0 so
+            // this is when the file is dropped.
             map.remove(&file);
             self.mod_track.set_to_zero(file);
+            // Update mtime and version.
+            let current_time = time::SystemTime::now()
+                .duration_since(time::UNIX_EPOCH)?
+                .as_secs();
+            let modified = self.mod_track.nonzero(file);
+            // We hold the lock when retrieving version and setting it.
+            let mut db_lock = self.database.lock().unwrap();
+            let version = db_lock.attr(file)?.version;
+            db_lock.set_attr(
+                file,
+                None,
+                Some(current_time),
+                if modified { Some(current_time) } else { None },
+                if modified { Some(version + 1) } else { None },
+            )?;
         }
-        let current_time = time::SystemTime::now()
-            .duration_since(time::UNIX_EPOCH)?
-            .as_secs();
-        let modified = self.mod_track.nonzero(file);
-        // We hold the lock when retrieving version and setting it.
-        let mut db_lock = self.database.lock().unwrap();
-        let version = db_lock.attr(file)?.version;
-        db_lock.set_attr(
-            file,
-            None,
-            Some(current_time),
-            if modified { Some(current_time) } else { None },
-            if modified { Some(version + 1) } else { None },
-        )?;
         Ok(())
     }
 
