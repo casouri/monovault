@@ -109,6 +109,18 @@ fn translate_error(err: VaultError) -> libc::c_int {
     }
 }
 
+/// Return true if `err` is truly common and generally can be ignored.
+fn venial_error_p(err: &VaultError) -> bool {
+    match err {
+        // VaultError::FileNameTooLong(_) => true,
+        VaultError::FileNotExist(_) => true,
+        // VaultError::NotDirectory(_) => true,
+        // VaultError::IsDirectory(_) => true,
+        // VaultError::DirectoryNotEmpty(_) => true,
+        _ => false,
+    }
+}
+
 impl FS {
     pub fn new(vaults: Vec<VaultLck>) -> FS {
         let mut vault_map = HashMap::new();
@@ -426,12 +438,21 @@ impl Filesystem for FS {
                 // ._., ._xxx, etc, they are turd files (Apple double
                 // files) like .DS_Store. See
                 // https://code.google.com/archive/p/macfuse/wikis/OPTIONS.wiki.
-                error!(
-                    "lookup(parent={:#x}, name={}) => {:?}",
-                    _parent,
-                    _name.to_string_lossy(),
-                    err
-                );
+                if venial_error_p(&err) {
+                    warn!(
+                        "lookup(parent={:#x}, name={}) => {:?}",
+                        _parent,
+                        _name.to_string_lossy(),
+                        err
+                    );
+                } else {
+                    error!(
+                        "lookup(parent={:#x}, name={}) => {:?}",
+                        _parent,
+                        _name.to_string_lossy(),
+                        err
+                    );
+                }
                 reply.error(translate_error(err));
             }
         }

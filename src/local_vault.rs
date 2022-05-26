@@ -230,6 +230,10 @@ impl Vault for LocalVault {
             VaultFileType::Directory => 1,
         };
         info.size = size;
+        debug!(
+            "(inode={}, name={}, size={}, atime={}, mtime={}, kind={:?})",
+            info.inode, info.name, info.size, info.atime, info.mtime, info.kind
+        );
         Ok(info)
     }
 
@@ -319,12 +323,6 @@ impl Vault for LocalVault {
     }
 
     fn close(&mut self, file: Inode) -> VaultResult<()> {
-        info!(
-            "close({}) ref_count {}->{}",
-            file,
-            self.ref_count.count(file),
-            self.ref_count.count(file) - 1
-        );
         // We don't access database during write because delete() will
         // remove the file from the database but before the last
         // close() is called, we still need to be able to serve read
@@ -333,6 +331,13 @@ impl Vault for LocalVault {
         // self.check_is_regular_file(file)?;
         self.check_data_file_exists(file)?;
         let count = self.ref_count.decf(file)?;
+        info!(
+            "close({}) ref_count {}->{}",
+            file,
+            // We don't want panic on under flow, so + rather than -.
+            self.ref_count.count(file) + 1,
+            self.ref_count.count(file)
+        );
         if count == 0 {
             // Update mtime and version.
             let current_time = time::SystemTime::now()
@@ -434,9 +439,10 @@ impl LocalVault {
             }
             VaultFileType::Directory => (),
         }
-
         self.database
-            .add_file(parent, child, name, kind, atime, mtime, version)
+            .add_file(parent, child, name, kind, atime, mtime, version)?;
+        self.ref_count.incf(child)?;
+        Ok(())
     }
 
     /// Return true if the file exists in the vault.
@@ -447,5 +453,9 @@ impl LocalVault {
             Err(VaultError::FileNotExist(_)) => Ok(false),
             Err(err) => Err(err),
         }
+    }
+
+    pub fn cache_ref_count(&self, file: Inode) -> u64 {
+        self.ref_count.count(file)
     }
 }

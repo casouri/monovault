@@ -87,6 +87,12 @@ impl Iterator for WriteIterator {
     type Item = FileToWrite;
 
     fn next(&mut self) -> Option<Self::Item> {
+        debug!(
+            "write.iter.next(offset={}, blk_size={}, len={})",
+            self.offset,
+            self.block_size,
+            self.data.len()
+        );
         if self.offset < self.data.len() {
             let end = std::cmp::min(self.offset + self.block_size, self.data.len());
             let stuff = FileToWrite {

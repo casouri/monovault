@@ -1,6 +1,6 @@
 use crate::local_vault::{LocalVault, RefCounter};
 use crate::types::*;
-use log::info;
+use log::{debug, info};
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
@@ -33,7 +33,6 @@ pub struct CachingVault {
     remote: Arc<Mutex<Box<dyn Vault>>>,
     graveyard: PathBuf,
     // background: Sender<RemoteOp>,
-    ref_count: RefCounter,
 }
 
 impl CachingVault {
@@ -58,7 +57,6 @@ impl CachingVault {
             remote: Arc::clone(&remote_vault),
             graveyard,
             // background: send,
-            ref_count: RefCounter::new(),
         })
     }
 }
@@ -80,6 +78,7 @@ impl Vault for CachingVault {
 
     fn attr(&mut self, file: Inode) -> VaultResult<FileInfo> {
         info!("attr({})", file);
+        // Remove local copy if FNE.
         self.remote.lock().unwrap().attr(file)
     }
 
@@ -100,16 +99,14 @@ impl Vault for CachingVault {
     }
 
     fn open(&mut self, file: Inode, mode: OpenMode) -> VaultResult<()> {
-        info!(
-            "open(file={}) ref_count {}->{}",
-            file,
-            self.ref_count.count(file),
-            self.ref_count.count(file) + 1
-        );
-        // Invariant: if ref_count > 0, then has local copy.
-        if self.ref_count.count(file) > 0 {
+        let count = self.local.lock().unwrap().cache_ref_count(file);
+        info!("open({}) ref_count {}->{}", file, count, count + 1);
+        // We use open/close of local vault to track ref_count.
+        self.local.lock().unwrap().open(file, mode)?;
+        // Invariant: if ref_count > 0, then we have local copy.
+        if count > 0 {
             // Already opened.
-            self.local.lock().unwrap().open(file, mode)?; // -> Will not throw NotExist.
+            ()
         } else {
             // Not already opened. But at this point the file meta
             // must already exists on the local vault. Because when
@@ -117,6 +114,7 @@ impl Vault for CachingVault {
             // listed file to local vault (but don't fetch file data).
             // Now, the data is either not fetched (version = 0), or
             // out-of-date (version too low), or up-to-date.
+            self.local.lock().unwrap().open(file, mode)?;
             let our_version = self.local.lock().unwrap().attr(file)?.version;
             // FIXME: handle disconnect.
             let remote_meta = self.remote.lock().unwrap().attr(file)?;
@@ -134,30 +132,39 @@ impl Vault for CachingVault {
                 self.local.lock().unwrap().write(file, 0, &data)?;
             }
         }
-        self.ref_count.incf(file)?;
         Ok(())
     }
 
     fn close(&mut self, file: Inode) -> VaultResult<()> {
-        info!(
-            "close(file={}) ref_count {}->{}",
-            file,
-            self.ref_count.count(file),
-            self.ref_count.count(file) - 1
-        );
-        self.ref_count.decf(file)?;
+        // We use open/close of local vault to track ref_count.
+        self.local.lock().unwrap().close(file)?;
+        let count = self.local.lock().unwrap().cache_ref_count(file);
+        // We don't want panic on under flow, so + rather than -.
+        info!("close({}) ref_count {}->{}", file, count + 1, count);
         // Is this the last close?
-        if self.ref_count.count(file) == 0 {
+        if count == 0 {
             // Yes, perform close. FIXME: do things in background.
             // Duplicate the file to graveyard for 1) sole access 2)
             // it's going to the graveyard if write conflict occurs
             // anyway.
-            let file_info = self.local.lock().unwrap().attr(file)?;
+            let info = self.local.lock().unwrap().attr(file)?;
+            debug!(
+                "write: inode={}, name={}, size={}, atime={}, mtime={}, kind={:?}",
+                info.inode, info.name, info.size, info.atime, info.mtime, info.kind
+            );
+            // let data = self
+            //     .local
+            //     .lock()
+            //     .unwrap()
+            //     .read(file, 0, file_info.size as u32)?;
+            // self.remote.lock().unwrap().write(file, 0, &data)?;
+
             let vault_name = self.remote.lock().unwrap().name();
             let graveyard_file_path = self.graveyard.join(format!(
-                "{}-{}({})v{}",
-                vault_name, file, file_info.name, file_info.version
+                "vault({})name({})inode({})version({})",
+                vault_name, info.name, file, info.version
             ));
+            debug!("write: copy to {}", graveyard_file_path.to_string_lossy());
             self.local
                 .lock()
                 .unwrap()
@@ -181,7 +188,7 @@ impl Vault for CachingVault {
     }
 
     fn delete(&mut self, file: Inode) -> VaultResult<()> {
-        info!("delete(file={})", file);
+        info!("delete({})", file);
         // FIXME: Handle disconnect. We don't wait for when ref_count
         // reaches 0. Remote and local vault will handle that.
         self.remote.lock().unwrap().delete(file)?;
@@ -189,7 +196,7 @@ impl Vault for CachingVault {
     }
 
     fn readdir(&mut self, dir: Inode) -> VaultResult<Vec<FileInfo>> {
-        info!("readdir(dir={})", dir);
+        info!("readdir({})", dir);
         // FIXME: Handle disconnection.
         for info in self.remote.lock().unwrap().readdir(dir)? {
             // Obviously dir is already in the local vault, otherwise

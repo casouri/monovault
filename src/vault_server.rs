@@ -110,8 +110,11 @@ impl VaultRpc for VaultServer {
         let mut counter = 0;
         while let Some(file) = stream.message().await? {
             info!(
-                "write[{}](file={}, offset={})",
-                counter, file.file, file.offset
+                "write[{}](file={}, offset={}, size={})",
+                counter,
+                file.file,
+                file.offset,
+                file.data.len()
             );
             counter += 1;
             let res = self
