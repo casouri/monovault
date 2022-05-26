@@ -2,11 +2,12 @@ use clap::{Arg, Command};
 use fuser::{self, MountOption};
 use monovault::{
     fuse::FS, local_vault::LocalVault, remote_vault::RemoteVault, types::*,
-    vault_server::VaultServer,
+    vault_server::run_server,
 };
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 fn main() {
     env_logger::init();
@@ -47,13 +48,16 @@ fn main() {
     vaults.push(Arc::clone(&local_vault));
 
     for (peer_name, peer_address) in config.peers {
-        let remote_vault = RemoteVault::new(peer_address, &peer_name)
+        let remote_vault = RemoteVault::new(&peer_address, &peer_name)
             .expect("Cannot create remote vault instance");
         vaults.push(Arc::new(Mutex::new(Box::new(remote_vault))));
     }
 
     // Run vault server.
-    let vault_server = VaultServer::new(Arc::clone(&local_vault));
+    // FIXME: Add panic restart and error report.
+    let addr = config.my_address.clone();
+    let vault_ref = Arc::clone(&local_vault);
+    let server_handle = thread::spawn(move || run_server(&addr, vault_ref));
 
     let options = vec![
         MountOption::FSName("monovault".to_string()),

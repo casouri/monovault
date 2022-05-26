@@ -1,11 +1,6 @@
-use crate::database::Database;
 use crate::local_vault::{LocalVault, RefCounter};
 use crate::types::*;
-use std::fs::File;
 use std::path::PathBuf;
-use std::sync::mpsc;
-use std::sync::mpsc::{Receiver, Sender};
-use std::thread;
 use std::time;
 use std::{
     path::Path,

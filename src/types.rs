@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::boxed::Box;
 use std::collections::HashMap;
-use std::fs::OpenOptions;
-use std::path::Path;
 use std::time;
 
 pub type VaultName = String;

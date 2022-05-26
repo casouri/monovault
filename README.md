@@ -52,3 +52,43 @@ unmount (on mac):
 ```shell
 umount -f /path/to/mount/point
 ```
+
+# Test the remote vault (with no caching)
+
+Now we run two instances of monovault locally. Instance A:
+
+```json
+{
+  "my_address": "127.0.0.1:7771",
+  "peers": {
+    "alice": "http://127.0.0.1:7772"
+  },
+  "mount_point": "/Users/yuan/p/cse223/monovault/mount",
+  "db_path": "/Users/yuan/p/cse223/monovault/db",
+  "local_vault_name": "yuan"
+}
+```
+
+Run by
+
+```json
+cargo run -- -c /path/to/config.json
+```
+
+Instance B:
+
+```json
+{
+  "my_address": "127.0.0.1:7772",
+  "peers": {
+    "yuan": "http://127.0.0.1:7771"
+  },
+  "mount_point": "/Users/yuan/p/cse223/monovault/mount2",
+  "db_path": "/Users/yuan/p/cse223/monovault/db2",
+  "local_vault_name": "alice"
+}
+```
+
+```json
+cargo run -- -c /path/to/config2.json
+```

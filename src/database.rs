@@ -15,7 +15,6 @@ pub struct Database {
     db: rusqlite::Connection,
     /// The path containing the database file and cache files.
     db_path: PathBuf,
-    db_name: String,
 }
 
 /// Setup the database if not already set up.
@@ -68,7 +67,6 @@ impl Database {
         Ok(Database {
             db: connection,
             db_path: db_path.to_path_buf(),
-            db_name: db_name.to_string(),
         })
     }
 

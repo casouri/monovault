@@ -3,11 +3,9 @@
 use crate::rpc;
 use crate::rpc::vault_rpc_client::VaultRpcClient;
 use crate::rpc::FileToWrite;
-use crate::types::VaultFileType::Directory;
-use crate::types::VaultFileType::File;
 use crate::types::*;
 use futures_util::stream;
-use std::sync::Mutex;
+use log::{debug, info};
 use tokio::runtime::{Builder, Runtime};
 use tokio_stream::StreamExt;
 use tonic::transport::Channel;
@@ -15,20 +13,49 @@ use tonic::Request;
 
 #[derive(Debug)]
 pub struct RemoteVault {
-    rt: Mutex<Runtime>,
-    client: Mutex<VaultRpcClient<Channel>>,
+    rt: Runtime,
+    addr: String,
+    client: Option<VaultRpcClient<Channel>>,
     name: String,
 }
 
+fn kind2num(v: VaultFileType) -> i32 {
+    let k = match v {
+        VaultFileType::File => 1,
+        VaultFileType::Directory => 2,
+    };
+    return k;
+}
+
+fn num2kind(k: i32) -> VaultFileType {
+    if k == 1 {
+        return VaultFileType::File;
+    } else {
+        return VaultFileType::Directory;
+    }
+}
+
 impl RemoteVault {
-    pub fn new(addr: String, name: &str) -> VaultResult<RemoteVault> {
+    pub fn new(addr: &str, name: &str) -> VaultResult<RemoteVault> {
         let rt = Builder::new_multi_thread().enable_all().build().unwrap();
-        let client = rt.block_on(VaultRpcClient::connect(addr))?;
         return Ok(RemoteVault {
-            rt: Mutex::new(rt),
-            client: Mutex::new(client),
+            rt,
+            addr: addr.to_string(),
+            client: None,
             name: name.to_string(),
         });
+    }
+
+    fn get_client(&mut self) -> VaultResult<()> {
+        let addr = self.addr.clone();
+        match &self.client {
+            Some(_) => Ok(()),
+            None => {
+                self.client = Some(self.rt.block_on(VaultRpcClient::connect(addr.clone()))?);
+                info!("Connected to {}", addr);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -38,20 +65,17 @@ impl Vault for RemoteVault {
     }
 
     fn attr(&mut self, file: Inode) -> VaultResult<FileInfo> {
-        let rt = self.rt.lock().unwrap();
-        let mut client = self.client.lock().unwrap();
-        let response = rt.block_on(client.attr(rpc::Inode { value: file }));
+        info!("attr({})", file);
+        self.get_client()?;
+        let client = self.client.as_mut().unwrap();
+        let response = self.rt.block_on(client.attr(rpc::Inode { value: file }));
         match response {
             Ok(value) => {
                 let v = value.into_inner();
                 Ok(FileInfo {
                     inode: v.inode,
                     name: v.name.to_string(),
-                    kind: if v.kind == 0 {
-                        VaultFileType::File
-                    } else {
-                        VaultFileType::Directory
-                    },
+                    kind: num2kind(v.kind),
                     size: v.size,
                     atime: v.atime,
                     mtime: v.mtime,
@@ -66,14 +90,17 @@ impl Vault for RemoteVault {
     }
 
     fn read(&mut self, file: Inode, offset: i64, size: u32) -> VaultResult<Vec<u8>> {
+        info!("read(file={}, offset={}, size={})", file, offset, size);
         let mut result: Vec<u8> = Vec::new();
-        let rt = self.rt.lock().unwrap();
-        let mut client = self.client.lock().unwrap();
-        let response = rt.block_on(client.read(rpc::FileToRead { file, offset, size }));
+        self.get_client()?;
+        let client = self.client.as_mut().unwrap();
+        let response = self
+            .rt
+            .block_on(client.read(rpc::FileToRead { file, offset, size }));
         match response {
             Ok(value) => {
                 let mut stream = value.into_inner();
-                while let Some(received) = rt.block_on(stream.next()) {
+                while let Some(received) = self.rt.block_on(stream.next()) {
                     match received {
                         Ok(value) => {
                             result.extend(&value.payload);
@@ -95,8 +122,9 @@ impl Vault for RemoteVault {
     }
 
     fn write(&mut self, file: Inode, offset: i64, data: &[u8]) -> VaultResult<u32> {
-        let rt = self.rt.lock().unwrap();
-        let mut client = self.client.lock().unwrap();
+        info!("write(file={}, offset={})", file, offset);
+        self.get_client()?;
+        let client = self.client.as_mut().unwrap();
         let mut file2write = vec![];
         file2write.push(FileToWrite {
             name: file,
@@ -104,43 +132,48 @@ impl Vault for RemoteVault {
             data: data.to_vec(),
         });
         let request = Request::new(stream::iter(file2write));
-        let response = rt.block_on(client.write(request)).unwrap();
+        let response = self.rt.block_on(client.write(request)).unwrap();
         Ok(response.into_inner().value)
     }
 
     fn create(&mut self, parent: Inode, name: &str, kind: VaultFileType) -> VaultResult<Inode> {
-        let rt = self.rt.lock().unwrap();
-        let mut client = self.client.lock().unwrap();
-        let mut request = rpc::FileToCreate {
+        info!("create(parent={}, name={}, kind={:?})", parent, name, kind);
+        self.get_client()?;
+        let client = self.client.as_mut().unwrap();
+        let request = rpc::FileToCreate {
             parent,
             name: name.to_string(),
-            kind: 1, // File = 0, Directory = 1,
+            kind: kind2num(kind),
         };
-        if matches!(kind, File) {
-            request.kind = 0;
-        }
-        let response = rt.block_on(client.create(request)).unwrap().into_inner();
+        let response = self
+            .rt
+            .block_on(client.create(request))
+            .unwrap()
+            .into_inner();
         return Ok(response.value);
     }
 
     fn open(&mut self, file: Inode, mode: OpenMode) -> VaultResult<()> {
-        let rt = self.rt.lock().unwrap();
-        let mut client = self.client.lock().unwrap();
+        info!("open(file={}, mode={:?})", file, mode);
+        self.get_client()?;
+        let client = self.client.as_mut().unwrap();
         let mut request = rpc::FileToOpen {
             file,
-            mode: 1, // R = 0, Rw = 1,
+            mode: 1, // R = 0, RW = 1,
         };
         if matches!(mode, OpenMode::R) {
             request.mode = 0;
         }
-        let _ = rt.block_on(client.open(request)).unwrap().into_inner();
+        let _ = self.rt.block_on(client.open(request)).unwrap().into_inner();
         return Ok(());
     }
 
     fn close(&mut self, file: Inode) -> VaultResult<()> {
-        let rt = self.rt.lock().unwrap();
-        let mut client = self.client.lock().unwrap();
-        let _ = rt
+        info!("close({})", file);
+        self.get_client()?;
+        let client = self.client.as_mut().unwrap();
+        let _ = self
+            .rt
             .block_on(client.close(rpc::Inode { value: file }))
             .unwrap()
             .into_inner();
@@ -148,9 +181,11 @@ impl Vault for RemoteVault {
     }
 
     fn delete(&mut self, file: Inode) -> VaultResult<()> {
-        let rt = self.rt.lock().unwrap();
-        let mut client = self.client.lock().unwrap();
-        let _ = rt
+        info!("delete({})", file);
+        self.get_client()?;
+        let client = self.client.as_mut().unwrap();
+        let _ = self
+            .rt
             .block_on(client.delete(rpc::Inode { value: file }))
             .unwrap()
             .into_inner();
@@ -158,9 +193,11 @@ impl Vault for RemoteVault {
     }
 
     fn readdir(&mut self, dir: Inode) -> VaultResult<Vec<FileInfo>> {
-        let rt = self.rt.lock().unwrap();
-        let mut client = self.client.lock().unwrap();
-        let response = rt
+        info!("readdir({})", dir);
+        self.get_client()?;
+        let client = self.client.as_mut().unwrap();
+        let response = self
+            .rt
             .block_on(client.readdir(rpc::Inode { value: dir }))
             .unwrap()
             .into_inner()
@@ -170,7 +207,7 @@ impl Vault for RemoteVault {
             .map(|info| FileInfo {
                 inode: info.inode,
                 name: info.name.clone(),
-                kind: if info.kind == 0 { File } else { Directory },
+                kind: num2kind(info.kind),
                 size: info.size,
                 atime: info.atime,
                 mtime: info.mtime,
