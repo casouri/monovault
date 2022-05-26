@@ -58,9 +58,14 @@ fn main() {
     let addr = config.my_address.clone();
     let vault_ref = Arc::clone(&local_vault);
     let server_handle = thread::spawn(move || run_server(&addr, vault_ref));
+    let mount_point_name = Path::new(&config.mount_point)
+        .file_name()
+        .unwrap()
+        .to_string_lossy();
 
     let options = vec![
-        MountOption::FSName("monovault".to_string()),
+        MountOption::FSName(mount_point_name.clone().into_owned()),
+        MountOption::CUSTOM(format!("volname={}", mount_point_name)),
         // Auto unmount on process exit (doesn't seem to work).
         MountOption::AutoUnmount,
         // Allow root user to access this file system.
