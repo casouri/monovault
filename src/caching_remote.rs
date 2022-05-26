@@ -78,8 +78,14 @@ impl Vault for CachingVault {
 
     fn attr(&mut self, file: Inode) -> VaultResult<FileInfo> {
         info!("attr({})", file);
-        // Remove local copy if FNE.
-        self.remote.lock().unwrap().attr(file)
+        match self.remote.lock().unwrap().attr(file) {
+            Ok(info) => Ok(info),
+            Err(VaultError::FileNotExist(file)) => {
+                self.local.lock().unwrap().delete(file)?;
+                Err(VaultError::FileNotExist(file))
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn read(&mut self, file: Inode, offset: i64, size: u32) -> VaultResult<Vec<u8>> {
@@ -152,13 +158,6 @@ impl Vault for CachingVault {
                 "write: inode={}, name={}, size={}, atime={}, mtime={}, kind={:?}",
                 info.inode, info.name, info.size, info.atime, info.mtime, info.kind
             );
-            // let data = self
-            //     .local
-            //     .lock()
-            //     .unwrap()
-            //     .read(file, 0, file_info.size as u32)?;
-            // self.remote.lock().unwrap().write(file, 0, &data)?;
-
             let vault_name = self.remote.lock().unwrap().name();
             let graveyard_file_path = self.graveyard.join(format!(
                 "vault({})name({})inode({})version({})",
