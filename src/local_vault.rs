@@ -120,7 +120,7 @@ impl LocalVault {
         if !db_dir.exists() {
             std::fs::create_dir(&db_dir)?
         }
-        let mut database = Database::new(&db_dir, name)?;
+        let database = Database::new(&db_dir, name)?;
         let current_inode = { database.largest_inode() };
         info!("vault {} next_inode={}", name, current_inode);
         Ok(LocalVault {
@@ -208,8 +208,20 @@ impl Vault for LocalVault {
     }
 
     fn attr(&mut self, file: Inode) -> VaultResult<FileInfo> {
-        debug!("attr(file={})", file);
-        let mut info = self.database.attr(file)?;
+        info!("attr({})", file);
+        // It is entirely valid (and possible) for the userspace to
+        // refer to a file that doesn't exist in the database: when a
+        // remote host deletes a file in our local vault, the
+        // userspace on our host still remembers that file. If our
+        // userspace now asks for that file, we can't throw a raw sql
+        // error, we should throw a proper file not find.
+        let mut info = match self.database.attr(file) {
+            Ok(info) => Ok(info),
+            Err(VaultError::SqliteError(rusqlite::Error::QueryReturnedNoRows)) => {
+                Err(VaultError::FileNotExist(file))
+            }
+            Err(err) => Err(err),
+        }?;
         let size = match info.kind {
             VaultFileType::File => {
                 let meta = std::fs::metadata(self.compose_path(file))?;
@@ -249,7 +261,12 @@ impl Vault for LocalVault {
     }
 
     fn write(&mut self, file: Inode, offset: i64, data: &[u8]) -> VaultResult<u32> {
-        info!("write(file={}, offset={})", file, offset);
+        info!(
+            "write(file={}, offset={}, size={})",
+            file,
+            offset,
+            data.len()
+        );
         // We don't access database during write because delete() will
         // remove the file from the database but before the last
         // close() is called, we still need to be able to serve read
@@ -289,7 +306,12 @@ impl Vault for LocalVault {
     }
 
     fn open(&mut self, file: Inode, mode: OpenMode) -> VaultResult<()> {
-        info!("open(file={})", file);
+        info!(
+            "open({}) ref_count {}->{}",
+            file,
+            self.ref_count.count(file),
+            self.ref_count.count(file) + 1
+        );
         self.check_is_regular_file(file)?;
         self.check_data_file_exists(file)?;
         self.ref_count.incf(file)?;
@@ -297,7 +319,12 @@ impl Vault for LocalVault {
     }
 
     fn close(&mut self, file: Inode) -> VaultResult<()> {
-        info!("close(file={})", file);
+        info!(
+            "close({}) ref_count {}->{}",
+            file,
+            self.ref_count.count(file),
+            self.ref_count.count(file) - 1
+        );
         // We don't access database during write because delete() will
         // remove the file from the database but before the last
         // close() is called, we still need to be able to serve read
@@ -307,12 +334,6 @@ impl Vault for LocalVault {
         self.check_data_file_exists(file)?;
         let count = self.ref_count.decf(file)?;
         if count == 0 {
-            let map = &mut self.fd_map;
-            // When the file is dropped it is automatically closed. We
-            // never store the file elsewhere and ref_count is 0 so
-            // this is when the file is dropped.
-            map.remove(&file);
-            self.mod_track.set_to_zero(file);
             // Update mtime and version.
             let current_time = time::SystemTime::now()
                 .duration_since(time::UNIX_EPOCH)?
@@ -326,12 +347,18 @@ impl Vault for LocalVault {
                 if modified { Some(current_time) } else { None },
                 if modified { Some(version + 1) } else { None },
             )?;
+            // When the file is dropped it is automatically closed. We
+            // never store the file elsewhere and ref_count is 0 so
+            // this is when the file is dropped.
+            let map = &mut self.fd_map;
+            map.remove(&file);
+            self.mod_track.set_to_zero(file);
         }
         Ok(())
     }
 
     fn delete(&mut self, file: Inode) -> VaultResult<()> {
-        info!("delete(file={})", file);
+        info!("delete({})", file);
         // Prefetch kind and store it, because we won't be able to
         // get it after deleting the file.
         let kind = self.database.attr(file)?.kind;
@@ -359,7 +386,7 @@ impl Vault for LocalVault {
     }
 
     fn readdir(&mut self, dir: Inode) -> VaultResult<Vec<FileInfo>> {
-        info!("readdir(dir={})", dir);
+        info!("readdir({})", dir);
         let (this, parent, entries) = self.database.readdir(dir)?;
         let mut result = vec![];
         for file in entries {
@@ -401,7 +428,13 @@ impl LocalVault {
         mtime: u64,
         version: u64,
     ) -> VaultResult<()> {
-        self.get_file(child)?;
+        match kind {
+            VaultFileType::File => {
+                self.get_file(child)?;
+            }
+            VaultFileType::Directory => (),
+        }
+
         self.database
             .add_file(parent, child, name, kind, atime, mtime, version)
     }

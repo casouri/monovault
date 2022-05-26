@@ -11,6 +11,11 @@ use tokio_stream::StreamExt;
 use tonic::transport::Channel;
 use tonic::Request;
 
+/// 100 network MB. Packets are split into packets on wire, this chunk
+/// size limit is just for saving memory. (Once we implement chunked
+/// read & write.)
+const GRPC_DATA_CHUNK_SIZE: usize = 1000000 * 100;
+
 #[derive(Debug)]
 pub struct RemoteVault {
     rt: Runtime,
@@ -55,6 +60,44 @@ impl RemoteVault {
                 info!("Connected to {}", addr);
                 Ok(())
             }
+        }
+    }
+}
+
+struct WriteIterator {
+    file: u64,
+    data: Vec<u8>,
+    offset: usize,
+    block_size: usize,
+}
+
+impl WriteIterator {
+    // TODO: Avoid copying.
+    fn new(file: u64, data: &[u8], offset: usize, block_size: usize) -> WriteIterator {
+        WriteIterator {
+            file,
+            data: data.to_vec(),
+            offset,
+            block_size,
+        }
+    }
+}
+
+impl Iterator for WriteIterator {
+    type Item = FileToWrite;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.offset < self.data.len() {
+            let end = std::cmp::min(self.offset + self.block_size, self.data.len());
+            let stuff = FileToWrite {
+                file: self.file,
+                offset: self.offset as i64,
+                data: self.data[self.offset..end].to_vec(),
+            };
+            self.offset = end;
+            Some(stuff)
+        } else {
+            None
         }
     }
 }
@@ -122,16 +165,20 @@ impl Vault for RemoteVault {
     }
 
     fn write(&mut self, file: Inode, offset: i64, data: &[u8]) -> VaultResult<u32> {
-        info!("write(file={}, offset={})", file, offset);
+        info!(
+            "write(file={}, offset={}, size={})",
+            file,
+            offset,
+            data.len()
+        );
         self.get_client()?;
         let client = self.client.as_mut().unwrap();
-        let mut file2write = vec![];
-        file2write.push(FileToWrite {
-            name: file,
-            offset,
-            data: data.to_vec(),
-        });
-        let request = Request::new(stream::iter(file2write));
+        let request = Request::new(stream::iter(WriteIterator::new(
+            file,
+            data,
+            offset as usize,
+            GRPC_DATA_CHUNK_SIZE,
+        )));
         let response = self.rt.block_on(client.write(request)).unwrap();
         Ok(response.into_inner().value)
     }

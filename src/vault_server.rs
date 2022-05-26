@@ -111,14 +111,14 @@ impl VaultRpc for VaultServer {
         while let Some(file) = stream.message().await? {
             info!(
                 "write[{}](file={}, offset={})",
-                counter, file.name, file.offset
+                counter, file.file, file.offset
             );
             counter += 1;
             let res = self
                 .local_vault
                 .lock()
                 .unwrap()
-                .write(file.name, file.offset, &file.data);
+                .write(file.file, file.offset, &file.data);
             match res {
                 Ok(v) => size += v,
                 Err(_) => return Err(Status::unknown("Function write in VaultServer failed!")),

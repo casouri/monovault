@@ -22,7 +22,9 @@ configuration file (a JSON file) should look something like this:
   "peers": {},
   "mount_point": "/Users/yuan/p/cse223/monovault/mount",
   "db_path": "/Users/yuan/p/cse223/monovault/db",
-  "local_vault_name": "pandora"
+  "local_vault_name": "pandora",
+  "caching": false,
+  "share_local_vault": false
 }
 ```
 
@@ -65,7 +67,9 @@ Now we run two instances of monovault locally. Instance A:
   },
   "mount_point": "/Users/yuan/p/cse223/monovault/mount",
   "db_path": "/Users/yuan/p/cse223/monovault/db",
-  "local_vault_name": "yuan"
+  "local_vault_name": "pandora",
+  "caching": false,
+  "share_local_vault": true
 }
 ```
 
@@ -85,10 +89,19 @@ Instance B:
   },
   "mount_point": "/Users/yuan/p/cse223/monovault/mount2",
   "db_path": "/Users/yuan/p/cse223/monovault/db2",
-  "local_vault_name": "alice"
+  "local_vault_name": "moon",
+  "caching": false,
+  "share_local_vault": true
 }
 ```
 
 ```json
 cargo run -- -c /path/to/config2.json
 ```
+
+# Test caching
+
+If caching is enabled, the filesystem downloads the file from remote
+when opening the file and reads and writes to the local copy, only
+resyncing to the remote when closing the file. To enable cache, set
+"caching" to true.

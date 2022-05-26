@@ -404,8 +404,8 @@ impl Filesystem for FS {
     }
 
     fn lookup(&mut self, _req: &Request, _parent: u64, _name: &std::ffi::OsStr, reply: ReplyEntry) {
-        debug!(
-            "lookup(parent={}, name={})",
+        info!(
+            "lookup(parent={:#x}, name={})",
             _parent,
             _name.to_string_lossy()
         );
@@ -427,7 +427,7 @@ impl Filesystem for FS {
                 // files) like .DS_Store. See
                 // https://code.google.com/archive/p/macfuse/wikis/OPTIONS.wiki.
                 error!(
-                    "lookup(parent={}, name={}) => {:?}",
+                    "lookup(parent={:#x}, name={}) => {:?}",
                     _parent,
                     _name.to_string_lossy(),
                     err
@@ -440,8 +440,8 @@ impl Filesystem for FS {
     fn getattr(&mut self, _req: &Request, _ino: u64, reply: ReplyAttr) {
         match self.getattr_1(_req, _ino) {
             Ok(entry) => {
-                debug!(
-                    "getattr({}) => (ino={}, kind={:?}, size={}, atime={}, mtime={})",
+                info!(
+                    "getattr({}) => (ino={:#x}, kind={:?}, size={}, atime={}, mtime={})",
                     _ino,
                     _ino,
                     translate_kind(entry.kind),
@@ -461,7 +461,7 @@ impl Filesystem for FS {
                 )
             }
             Err(err) => {
-                error!("getattr({}) => {:?}", _ino, err);
+                error!("getattr({:#x}) => {:?}", _ino, err);
                 reply.error(translate_error(err))
             }
         }
@@ -486,7 +486,7 @@ impl Filesystem for FS {
         reply: ReplyAttr,
     ) {
         info!(
-            "setattr(ino={}, uid={:?}, gid={:?}, size={:?})",
+            "setattr(ino={:#x}, uid={:?}, gid={:?}, size={:?})",
             ino, uid, gid, size
         );
         self.getattr(_req, ino, reply)
@@ -505,7 +505,7 @@ impl Filesystem for FS {
         match self.create_1(_req, parent, name, mode, umask, flags) {
             Ok(inode) => {
                 info!(
-                    "create(parent={}, name={}) => {}",
+                    "create(parent={:#x}, name={}) => {}",
                     parent,
                     name.to_string_lossy(),
                     inode
@@ -521,7 +521,7 @@ impl Filesystem for FS {
             }
             Err(err) => {
                 error!(
-                    "create(parent={}, name={}) => {:?}",
+                    "create(parent={:#x}, name={}) => {:?}",
                     parent,
                     name.to_string_lossy(),
                     err
@@ -532,11 +532,11 @@ impl Filesystem for FS {
     }
 
     fn open(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
-        info!("open(ino={})", _ino);
+        info!("open({:#x})", _ino);
         match self.open_1(_req, _ino, _flags) {
             Ok(_) => reply.opened(0, 0),
             Err(err) => {
-                error!("open(ino={}) => {:?}", _ino, err);
+                error!("open({:#x}) => {:?}", _ino, err);
                 reply.error(translate_error(err))
             }
         }
@@ -552,11 +552,11 @@ impl Filesystem for FS {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        info!("release(ino={})", _ino);
+        info!("release({:#x})", _ino);
         match self.release_1(_req, _ino, _fh, _flags, _lock_owner, _flush) {
             Ok(_) => reply.ok(),
             Err(err) => {
-                error!("release(ino={}) => {:?}", _ino, err);
+                error!("release({:#x}) => {:?}", _ino, err);
                 reply.error(translate_error(err))
             }
         }
@@ -573,12 +573,12 @@ impl Filesystem for FS {
         lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        info!("read(ino={}, offset={}, size={})", ino, offset, size);
+        info!("read(ino={:#x}, offset={}, size={})", ino, offset, size);
         match self.read_1(_req, ino, fh, offset, size, flags, lock_owner) {
             Ok(data) => reply.data(&data),
             Err(err) => {
                 error!(
-                    "read(ino={}, offset={}, size={}) => {:?}",
+                    "read(ino={:#x}, offset={}, size={}) => {:?}",
                     ino, offset, size, err
                 );
                 reply.error(translate_error(err))
@@ -598,11 +598,16 @@ impl Filesystem for FS {
         lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        info!("write(ino={}, offset={})", ino, offset);
+        info!(
+            "write(ino={:#x}, offset={}, size={})",
+            ino,
+            offset,
+            data.len()
+        );
         match self.write_1(_req, ino, fh, offset, data, write_flags, flags, lock_owner) {
             Ok(size) => reply.written(size),
             Err(err) => {
-                error!("write(ino={}, offset={}) =? {:?}", ino, offset, err);
+                error!("write(ino={:#x}, offset={}) =? {:?}", ino, offset, err);
                 reply.error(translate_error(err))
             }
         }
@@ -616,17 +621,21 @@ impl Filesystem for FS {
         _lock_owner: u64,
         reply: ReplyEmpty,
     ) {
-        info!("flush(ino={})", ino);
+        info!("flush({:#x})", ino);
         reply.ok();
     }
 
     fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-        info!("unlink(parent={}, name={})", parent, name.to_string_lossy());
+        info!(
+            "unlink(parent={:#x}, name={})",
+            parent,
+            name.to_string_lossy()
+        );
         match self.unlink_1(_req, parent, name, FileType::RegularFile) {
             Ok(_) => reply.ok(),
             Err(err) => {
                 error!(
-                    "unlink(parent={}, name={}) => {:?}",
+                    "unlink(parent={:#x}, name={}) => {:?}",
                     parent,
                     name.to_string_lossy(),
                     err
@@ -637,7 +646,7 @@ impl Filesystem for FS {
     }
 
     fn opendir(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
-        info!("opendir(ino={})", _ino);
+        info!("opendir({:#x})", _ino);
         reply.opened(0, 0);
     }
 
@@ -649,7 +658,7 @@ impl Filesystem for FS {
         _flags: i32,
         reply: ReplyEmpty,
     ) {
-        info!("releasedir(ino={})", _ino);
+        info!("releasedir({:#x})", _ino);
         reply.ok();
     }
 
@@ -662,11 +671,15 @@ impl Filesystem for FS {
         umask: u32,
         reply: ReplyEntry,
     ) {
-        info!("mkdir(parent={}, name={})", parent, name.to_string_lossy());
+        info!(
+            "mkdir(parent={:#x}, name={})",
+            parent,
+            name.to_string_lossy()
+        );
         match self.mkdir_1(_req, parent, name, mode, umask) {
             Ok(inode) => {
                 info!(
-                    "mkdir(parent={}, name={}) => {}",
+                    "mkdir(parent={:#x}, name={}) => {}",
                     parent,
                     name.to_string_lossy(),
                     inode
@@ -676,7 +689,7 @@ impl Filesystem for FS {
             }
             Err(err) => {
                 error!(
-                    "mkdir(parent={}, name={}) => {:?}",
+                    "mkdir(parent={:#x}, name={}) => {:?}",
                     parent,
                     name.to_string_lossy(),
                     err
@@ -694,14 +707,14 @@ impl Filesystem for FS {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        info!("readdir(ino={}, offset={})", ino, offset);
+        info!("readdir(ino={:#x}, offset={})", ino, offset);
         match self.readdir_1(_req, ino, fh, offset) {
             Ok(inode_list) => {
                 if (offset as usize) < inode_list.len() {
                     for idx in (offset as usize)..inode_list.len() {
                         let (inode, name, ty) = inode_list[idx].clone();
                         info!(
-                            "reply.add(inode={}, offset={}, name={})",
+                            "reply.add(inode={:#x}, offset={}, name={})",
                             inode,
                             idx + 1,
                             &name
@@ -720,19 +733,23 @@ impl Filesystem for FS {
                 }
             }
             Err(err) => {
-                error!("readdir(ino={}, offset={}) => {:?}", ino, offset, err);
+                error!("readdir(ino={:#x}, offset={}) => {:?}", ino, offset, err);
                 reply.error(translate_error(err))
             }
         }
     }
 
     fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-        info!("rmdir(parent={}, name={})", parent, name.to_string_lossy());
+        info!(
+            "rmdir(parent={:#x}, name={})",
+            parent,
+            name.to_string_lossy()
+        );
         if parent == 1 {
             // We don't allow deleting root and vault directories
             // (obviously). See rmdir(2) for detail on EBUSY.
             error!(
-                "rmdir(parent={}, name={}) => EBUSY",
+                "rmdir(parent={:#x}, name={}) => EBUSY",
                 parent,
                 name.to_string_lossy()
             );
@@ -743,7 +760,7 @@ impl Filesystem for FS {
             Ok(_) => reply.ok(),
             Err(err) => {
                 error!(
-                    "rmdir(parent={}, name={}) => {:?}",
+                    "rmdir(parent={:#x}, name={}) => {:?}",
                     parent,
                     name.to_string_lossy(),
                     err

@@ -1,8 +1,8 @@
 use clap::{Arg, Command};
 use fuser::{self, MountOption};
 use monovault::{
-    fuse::FS, local_vault::LocalVault, remote_vault::RemoteVault, types::*,
-    vault_server::run_server,
+    caching_remote::CachingVault, fuse::FS, local_vault::LocalVault, remote_vault::RemoteVault,
+    types::*, vault_server::run_server,
 };
 use std::fs;
 use std::path::Path;
@@ -50,19 +50,30 @@ fn main() {
     for (peer_name, peer_address) in config.peers {
         let remote_vault = RemoteVault::new(&peer_address, &peer_name)
             .expect("Cannot create remote vault instance");
-        vaults.push(Arc::new(Mutex::new(Box::new(remote_vault))));
+        if config.caching {
+            let caching_remote = CachingVault::new(
+                Arc::new(Mutex::new(Box::new(remote_vault))),
+                &Path::new(&config.db_path),
+            )
+            .expect("Cannot create caching remote instance");
+            vaults.push(Arc::new(Mutex::new(Box::new(caching_remote))));
+        } else {
+            vaults.push(Arc::new(Mutex::new(Box::new(remote_vault))));
+        }
     }
 
     // Run vault server.
     // FIXME: Add panic restart and error report.
-    let addr = config.my_address.clone();
-    let vault_ref = Arc::clone(&local_vault);
-    let server_handle = thread::spawn(move || run_server(&addr, vault_ref));
+    if config.share_local_vault {
+        let addr = config.my_address.clone();
+        let vault_ref = Arc::clone(&local_vault);
+        let server_handle = thread::spawn(move || run_server(&addr, vault_ref));
+    }
+
     let mount_point_name = Path::new(&config.mount_point)
         .file_name()
         .unwrap()
         .to_string_lossy();
-
     let options = vec![
         MountOption::FSName(mount_point_name.clone().into_owned()),
         MountOption::CUSTOM(format!("volname={}", mount_point_name)),

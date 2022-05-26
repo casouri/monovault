@@ -11,11 +11,22 @@ pub type VaultResult<T> = std::result::Result<T, VaultError>;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
+    /// The address our vault server listens on.
     pub my_address: VaultAddress,
+    /// A map of peer name to addresses. Addresses should include
+    /// address scheme (http://).
     pub peers: HashMap<VaultName, VaultAddress>,
+    /// Mount point of the file system.
     pub mount_point: String,
+    /// Path to the directory that stores the database.
     pub db_path: String,
+    /// Name of the local vault.
     pub local_vault_name: VaultName,
+    /// If true, cache remote files locally.
+    pub caching: bool,
+    /// If false, don't run a vault server that shares the local vault
+    /// with peers.
+    pub share_local_vault: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
@@ -87,9 +98,6 @@ impl From<tonic::transport::Error> for VaultError {
 pub trait Vault: Send {
     /// Return the name of the vault.
     fn name(&self) -> String;
-    fn setup(&mut self) -> VaultResult<()> {
-        Ok(())
-    }
     fn tear_down(&mut self) -> VaultResult<()> {
         Ok(())
     }
