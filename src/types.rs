@@ -51,11 +51,9 @@ pub enum VaultError {
     NotDirectory(Inode),
     IsDirectory(Inode),
     DirectoryNotEmpty(Inode),
-    NetworkError(Box<dyn std::error::Error>),
-    Unknown(Box<dyn std::error::Error>),
+    RemoteError(Box<dyn std::error::Error>),
     WriteConflict(Inode, u64, u64),
     SqliteError(rusqlite::Error),
-    MarshallError(serde_json::Error),
     SystemTimeError(time::SystemTimeError),
     IOError(std::io::Error),
     RpcError(tonic::transport::Error),
@@ -64,12 +62,6 @@ pub enum VaultError {
 impl From<rusqlite::Error> for VaultError {
     fn from(err: rusqlite::Error) -> Self {
         VaultError::SqliteError(err)
-    }
-}
-
-impl From<serde_json::Error> for VaultError {
-    fn from(err: serde_json::Error) -> Self {
-        VaultError::MarshallError(err)
     }
 }
 

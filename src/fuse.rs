@@ -103,7 +103,8 @@ fn translate_error(err: VaultError) -> libc::c_int {
         VaultError::NotDirectory(_) => libc::ENOTDIR,
         VaultError::IsDirectory(_) => libc::EISDIR,
         VaultError::DirectoryNotEmpty(_) => libc::ENOTEMPTY,
-        VaultError::NetworkError(_) => libc::EREMOTE,
+        VaultError::RemoteError(_) => libc::EREMOTE,
+        VaultError::RpcError(_) => libc::ENETDOWN,
         _ => libc::EIO,
     }
 }

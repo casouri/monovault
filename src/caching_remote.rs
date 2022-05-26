@@ -63,7 +63,7 @@ impl CachingVault {
 fn network_err_to_option<T>(result: VaultResult<T>) -> VaultResult<Option<T>> {
     match result {
         Ok(val) => Ok(Some(val)),
-        Err(VaultError::NetworkError(_)) => Ok(None),
+        Err(VaultError::RpcError(_)) => Ok(None),
         Err(err) => Err(err),
     }
 }
