@@ -63,7 +63,7 @@ Now we run two instances of monovault locally. Instance A:
 {
   "my_address": "127.0.0.1:7771",
   "peers": {
-    "alice": "http://127.0.0.1:7772"
+    "moon": "http://127.0.0.1:7772"
   },
   "mount_point": "/Users/yuan/p/cse223/monovault/mount",
   "db_path": "/Users/yuan/p/cse223/monovault/db",
@@ -85,7 +85,7 @@ Instance B:
 {
   "my_address": "127.0.0.1:7772",
   "peers": {
-    "yuan": "http://127.0.0.1:7771"
+    "pandora": "http://127.0.0.1:7771"
   },
   "mount_point": "/Users/yuan/p/cse223/monovault/mount2",
   "db_path": "/Users/yuan/p/cse223/monovault/db2",
