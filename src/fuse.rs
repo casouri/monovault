@@ -5,7 +5,7 @@ use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, ReplyOpen, ReplyWrite, Request,
 };
-use log::{debug, error, info, warn};
+use log::{debug, error, info, log, warn};
 use std::boxed::Box;
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -114,6 +114,7 @@ fn venial_error_p(err: &VaultError) -> bool {
     match err {
         // VaultError::FileNameTooLong(_) => true,
         VaultError::FileNotExist(_) => true,
+        VaultError::FileAlreadyExist(_, _) => true,
         // VaultError::NotDirectory(_) => true,
         // VaultError::IsDirectory(_) => true,
         // VaultError::DirectoryNotEmpty(_) => true,
@@ -438,21 +439,18 @@ impl Filesystem for FS {
                 // ._., ._xxx, etc, they are turd files (Apple double
                 // files) like .DS_Store. See
                 // https://code.google.com/archive/p/macfuse/wikis/OPTIONS.wiki.
-                if venial_error_p(&err) {
-                    warn!(
-                        "lookup(parent={:#x}, name={}) => {:?}",
-                        _parent,
-                        _name.to_string_lossy(),
-                        err
-                    );
+                let level = if venial_error_p(&err) {
+                    log::Level::Warn
                 } else {
-                    error!(
-                        "lookup(parent={:#x}, name={}) => {:?}",
-                        _parent,
-                        _name.to_string_lossy(),
-                        err
-                    );
-                }
+                    log::Level::Error
+                };
+                log!(
+                    level,
+                    "lookup(parent={:#x}, name={}) => {:?}",
+                    _parent,
+                    _name.to_string_lossy(),
+                    err
+                );
                 reply.error(translate_error(err));
             }
         }
@@ -709,7 +707,13 @@ impl Filesystem for FS {
                 reply.entry(&ttl(), &attr(inode, FileType::Directory, 1, 0, 0), 0)
             }
             Err(err) => {
-                error!(
+                let level = if venial_error_p(&err) {
+                    log::Level::Warn
+                } else {
+                    log::Level::Error
+                };
+                log!(
+                    level,
                     "mkdir(parent={:#x}, name={}) => {:?}",
                     parent,
                     name.to_string_lossy(),

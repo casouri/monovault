@@ -87,6 +87,7 @@ impl RefCounter {
 pub struct LocalVault {
     /// Name of this vault.
     name: String,
+    /// Directory in which we store data files.
     data_file_dir: PathBuf,
     /// Database for metadata.
     database: Database,
@@ -287,6 +288,10 @@ impl Vault for LocalVault {
 
     fn create(&mut self, parent: Inode, name: &str, kind: VaultFileType) -> VaultResult<Inode> {
         info!("create(parent={}, name={}, kind={:?})", parent, name, kind);
+        let already_has_file = self.readdir(parent)?.iter().any(|info| info.name == name);
+        if already_has_file {
+            return Err(VaultError::FileAlreadyExist(parent, name.to_string()));
+        }
         let inode = self.new_inode();
         // In fuse semantics (and thus vault's) create also open the
         // file. We need to call get_file to ensure the data file is
@@ -412,9 +417,9 @@ impl Vault for LocalVault {
 
 /// Caching functions
 
-impl LocalVault {
+impl VaultCache for LocalVault {
     /// Copy `file` to `path`.
-    pub fn copy_file(&self, file: Inode, path: &Path) -> VaultResult<u64> {
+    fn cache_copy_file(&self, file: Inode, path: &Path) -> VaultResult<u64> {
         let from_path = self.compose_path(file);
         let size = std::fs::copy(&from_path, path)?;
         Ok(size)
@@ -423,7 +428,7 @@ impl LocalVault {
     // Create data file and meta data for `child`. Set `version` to 0
     // so content is fetched on open. This function should only be
     // called when `child` does not exist.
-    pub fn cache_add_file(
+    fn cache_add_file(
         &mut self,
         parent: Inode,
         child: Inode,
@@ -446,7 +451,7 @@ impl LocalVault {
     }
 
     /// Return true if the file exists in the vault.
-    pub fn cache_has_file(&mut self, file: Inode) -> VaultResult<bool> {
+    fn cache_has_file(&mut self, file: Inode) -> VaultResult<bool> {
         // Invariant: if meta exists, data file must exist.
         match self.attr(file) {
             Ok(_) => Ok(true),
@@ -455,7 +460,7 @@ impl LocalVault {
         }
     }
 
-    pub fn cache_ref_count(&self, file: Inode) -> u64 {
+    fn cache_ref_count(&self, file: Inode) -> u64 {
         self.ref_count.count(file)
     }
 }

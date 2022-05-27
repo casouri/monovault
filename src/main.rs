@@ -25,28 +25,34 @@ fn main() {
         .get_matches();
 
     let config_path = matches.value_of("config").unwrap();
-    let config: Config = serde_json::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
+    let config_file_content =
+        &fs::read_to_string(config_path).expect("Cannot read the configuration file");
+    let config: Config =
+        serde_json::from_str(config_file_content).expect("Cannot parse the configuration file");
 
     // TODO: Check for duplicate vault name.
 
+    // Make sure mount point exists.
     let mount_point = Path::new(&config.mount_point);
     if !mount_point.exists() {
         panic!("Mount point doesn't exist");
     }
 
+    // Make sure db_path exists.
     let db_path = Path::new(&config.db_path);
     if !db_path.exists() {
         fs::create_dir(&db_path).expect("Cannot create directory for database");
     }
 
-    // Create vault instances.
-    let mut vaults: Vec<Arc<Mutex<Box<dyn Vault>>>> = vec![];
-    let local_vault: Arc<Mutex<Box<dyn Vault>>> = Arc::new(Mutex::new(Box::new(
-        LocalVault::new(&config.local_vault_name, &db_path)
-            .expect("Cannot create local vault instance"),
-    )));
-    vaults.push(Arc::clone(&local_vault));
+    // Create local vault.
+    let mut vaults: Vec<VaultRef> = vec![];
+    let local_vault = LocalVault::new(&config.local_vault_name, &db_path)
+        .expect("Cannot create local vault instance");
+    let local_vault_ref: Arc<Mutex<Box<dyn Vault>>> = Arc::new(Mutex::new(Box::new(local_vault)));
 
+    vaults.push(Arc::clone(&local_vault_ref));
+
+    // Create remote vaults.
     for (peer_name, peer_address) in config.peers {
         let remote_vault = RemoteVault::new(&peer_address, &peer_name)
             .expect("Cannot create remote vault instance");
@@ -54,6 +60,8 @@ fn main() {
             let caching_remote = CachingVault::new(
                 Arc::new(Mutex::new(Box::new(remote_vault))),
                 &Path::new(&config.db_path),
+                config.allow_disconnected_delete,
+                config.allow_disconnected_create,
             )
             .expect("Cannot create caching remote instance");
             vaults.push(Arc::new(Mutex::new(Box::new(caching_remote))));
@@ -63,13 +71,14 @@ fn main() {
     }
 
     // Run vault server.
-    // FIXME: Add panic restart and error report.
+    // TODO: Add restart?
     if config.share_local_vault {
         let addr = config.my_address.clone();
-        let vault_ref = Arc::clone(&local_vault);
-        let server_handle = thread::spawn(move || run_server(&addr, vault_ref));
+        let vault_ref = Arc::clone(&local_vault_ref);
+        let _server_handle = thread::spawn(move || run_server(&addr, vault_ref));
     }
 
+    // Configure and start FS.
     let mount_point_name = Path::new(&config.mount_point)
         .file_name()
         .unwrap()
@@ -88,5 +97,5 @@ fn main() {
         MountOption::CUSTOM("noappledouble".to_string()),
     ];
     let fs = FS::new(vaults);
-    fuser::mount2(fs, &config.mount_point, &options).unwrap();
+    fuser::mount2(fs, &config.mount_point, &options).expect("Error running the file system");
 }

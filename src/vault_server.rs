@@ -1,3 +1,4 @@
+use crate::local_vault::LocalVault;
 // A gRPC server that receives requests and uses local_vault to do the
 // actual work.
 use crate::rpc::vault_rpc_server;
@@ -6,32 +7,30 @@ use crate::rpc::{
     DataChunk, DirEntryList, Empty, FileInfo, FileToCreate, FileToOpen, FileToRead, FileToWrite,
     Inode, Size,
 };
-use crate::types::{OpenMode, Vault, VaultFileType};
+use crate::types::{OpenMode, Vault, VaultFileType, VaultRef, VaultResult};
 use async_trait::async_trait;
-use log::info;
-use std::sync::{Arc, Mutex};
+use log::{debug, info};
 use tokio::net::TcpListener;
 use tokio::runtime::Builder;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-pub fn run_server(address: &str, local_vault: Arc<Mutex<Box<dyn Vault>>>) {
+pub fn run_server(address: &str, local_vault: VaultRef) -> VaultResult<()> {
     let rt = Builder::new_multi_thread().enable_all().build().unwrap();
+    let service = vault_rpc_server::VaultRpcServer::new(VaultServer::new(local_vault));
+    let server = tonic::transport::Server::builder().add_service(service.clone());
     let incoming = match rt.block_on(TcpListener::bind(address)) {
         Ok(lis) => tokio_stream::wrappers::TcpListenerStream::new(lis),
-        Err(err) => {
-            panic!("Error creating incoming channel for server: {}", err);
-        }
+        Err(err) => return Err(err.into()),
     };
-    let service = vault_rpc_server::VaultRpcServer::new(VaultServer::new(local_vault));
-    let server = tonic::transport::Server::builder().add_service(service);
     info!("Server started");
-    rt.block_on(server.serve_with_incoming(incoming)).unwrap();
+    rt.block_on(server.serve_with_incoming(incoming))?;
+    Ok(())
 }
 
 pub struct VaultServer {
-    local_vault: Arc<Mutex<Box<dyn Vault>>>,
+    local_vault: VaultRef,
 }
 
 fn kind2num(v: VaultFileType) -> i32 {
@@ -51,7 +50,7 @@ fn num2kind(k: i32) -> VaultFileType {
 }
 
 impl VaultServer {
-    pub fn new(local_vault: Arc<Mutex<Box<dyn Vault>>>) -> VaultServer {
+    pub fn new(local_vault: VaultRef) -> VaultServer {
         VaultServer { local_vault }
     }
 }
@@ -129,6 +128,7 @@ impl VaultRpc for VaultServer {
         }
         Ok(Response::new(Size { value: size }))
     }
+
     async fn create(&self, request: Request<FileToCreate>) -> Result<Response<Inode>, Status> {
         let request_inner = request.into_inner();
         info!(

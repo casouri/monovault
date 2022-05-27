@@ -1,11 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::boxed::Box;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time;
 
 pub type VaultName = String;
 pub type VaultAddress = String;
 pub type Inode = u64;
+pub type VaultRef = Arc<Mutex<Box<dyn Vault>>>;
 
 pub type VaultResult<T> = std::result::Result<T, VaultError>;
 
@@ -27,6 +30,13 @@ pub struct Config {
     /// If false, don't run a vault server that shares the local vault
     /// with peers.
     pub share_local_vault: bool,
+    /// Whether allow disconnected delete.
+    pub allow_disconnected_delete: bool,
+    /// Whether to allow disconnected create.
+    pub allow_disconnected_create: bool,
+    /// Wait this long between each background synchronization to
+    /// remote vaults.
+    pub background_update_interval: f32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
@@ -54,20 +64,26 @@ pub enum OpenMode {
 
 #[derive(Debug)]
 pub enum VaultError {
+    // Errors that are returned from local and remote vault.
     FileNameTooLong(String),
-    NoCorrespondingVault(Inode),
-    U64Overflow(u64),
-    U64Underflow(u64),
     FileNotExist(Inode),
     NotDirectory(Inode),
     IsDirectory(Inode),
     DirectoryNotEmpty(Inode),
-    RemoteError(Box<dyn std::error::Error>),
+    FileAlreadyExist(Inode, String),
+    // Error that are returned from remote vault.
+    RpcError(tonic::transport::Error),
+    RemoteError(String),
+    // All errors below are squashed into a RemoteError if returned
+    // from a remove vault. They are returned normally if from a local
+    // vault.
+    NoCorrespondingVault(Inode),
+    U64Overflow(u64),
+    U64Underflow(u64),
     WriteConflict(Inode, u64, u64),
     SqliteError(rusqlite::Error),
     SystemTimeError(time::SystemTimeError),
     IOError(std::io::Error),
-    RpcError(tonic::transport::Error),
 }
 
 impl From<rusqlite::Error> for VaultError {
@@ -119,4 +135,20 @@ pub trait Vault: Send {
     /// List directory entries of `dir`. The listing includes "." and
     /// "..", but if `dir` is vault root, ".." is not included.
     fn readdir(&mut self, dir: Inode) -> VaultResult<Vec<FileInfo>>;
+}
+
+pub trait VaultCache: Vault {
+    fn cache_copy_file(&self, file: Inode, path: &Path) -> VaultResult<u64>;
+    fn cache_add_file(
+        &mut self,
+        parent: Inode,
+        child: Inode,
+        name: &str,
+        kind: VaultFileType,
+        atime: u64,
+        mtime: u64,
+        version: u64,
+    ) -> VaultResult<()>;
+    fn cache_has_file(&mut self, file: Inode) -> VaultResult<bool>;
+    fn cache_ref_count(&self, file: Inode) -> u64;
 }
