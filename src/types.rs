@@ -142,19 +142,3 @@ pub trait Vault: Send + Any {
     /// "..", but if `dir` is vault root, ".." is not included.
     fn readdir(&mut self, dir: Inode) -> VaultResult<Vec<FileInfo>>;
 }
-
-pub trait VaultCache: Vault {
-    fn cache_copy_file(&self, file: Inode, path: &Path) -> VaultResult<u64>;
-    fn cache_add_file(
-        &mut self,
-        parent: Inode,
-        child: Inode,
-        name: &str,
-        kind: VaultFileType,
-        atime: u64,
-        mtime: u64,
-        version: u64,
-    ) -> VaultResult<()>;
-    fn cache_has_file(&mut self, file: Inode) -> VaultResult<bool>;
-    fn cache_ref_count(&self, file: Inode) -> u64;
-}

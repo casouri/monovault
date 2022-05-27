@@ -416,9 +416,9 @@ impl Vault for LocalVault {
 
 /// Caching functions
 
-impl VaultCache for LocalVault {
+impl LocalVault {
     /// Copy `file` to `path`.
-    fn cache_copy_file(&self, file: Inode, path: &Path) -> VaultResult<u64> {
+    pub fn cache_copy_file(&self, file: Inode, path: &Path) -> VaultResult<u64> {
         let from_path = self.compose_path(file);
         let size = std::fs::copy(&from_path, path)?;
         Ok(size)
@@ -427,7 +427,7 @@ impl VaultCache for LocalVault {
     // Create data file and meta data for `child`. Set `version` to 0
     // so content is fetched on open. This function should only be
     // called when `child` does not exist.
-    fn cache_add_file(
+    pub fn cache_add_file(
         &mut self,
         parent: Inode,
         child: Inode,
@@ -450,7 +450,7 @@ impl VaultCache for LocalVault {
     }
 
     /// Return true if the file exists in the vault.
-    fn cache_has_file(&mut self, file: Inode) -> VaultResult<bool> {
+    pub fn cache_has_file(&mut self, file: Inode) -> VaultResult<bool> {
         // Invariant: if meta exists, data file must exist.
         match self.attr(file) {
             Ok(_) => Ok(true),
@@ -459,7 +459,7 @@ impl VaultCache for LocalVault {
         }
     }
 
-    fn cache_ref_count(&self, file: Inode) -> u64 {
+    pub fn cache_ref_count(&self, file: Inode) -> u64 {
         self.ref_count.count(file)
     }
 }
