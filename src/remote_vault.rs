@@ -1,20 +1,13 @@
-// Basically a gRPC client that makes requests to remote vault servers.
-
+/// Basically a gRPC client that makes requests to remote vault servers.
 use crate::rpc;
 use crate::rpc::vault_rpc_client::VaultRpcClient;
 use crate::rpc::FileToWrite;
 use crate::types::*;
-use futures_util::stream;
 use log::{debug, info};
 use tokio::runtime::{Builder, Runtime};
 use tokio_stream::StreamExt;
 use tonic::transport::Channel;
 use tonic::Request;
-
-/// 100 network MB. Packets are split into packets on wire, this chunk
-/// size limit is just for saving memory. (Once we implement chunked
-/// read & write.)
-const GRPC_DATA_CHUNK_SIZE: usize = 1000000 * 100;
 
 #[derive(Debug)]
 pub struct RemoteVault {
@@ -179,7 +172,7 @@ impl Vault for RemoteVault {
         );
         self.get_client()?;
         let client = self.client.as_mut().unwrap();
-        let request = Request::new(stream::iter(WriteIterator::new(
+        let request = Request::new(tokio_stream::iter(WriteIterator::new(
             file,
             data,
             offset as usize,

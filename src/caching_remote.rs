@@ -1,3 +1,5 @@
+/// The caching vault first replicates data locally and send read/write
+/// request to remote vault in the background.
 use crate::local_vault::{LocalVault, RefCounter};
 use crate::types::*;
 use log::{debug, error, info};
@@ -10,9 +12,6 @@ use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time;
-
-// The caching vault first replicates data locally and send read/write
-// request to remote vault in the background.
 
 #[derive(Debug, Clone)]
 pub enum BackgroundOp {

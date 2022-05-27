@@ -19,7 +19,6 @@ prost = "0.10" # Required by tonic
 async-trait = "0.1"
 tokio = { version = "1.0", features = [ "rt-multi-thread", "time", "fs", "macros", "net",] }
 tokio-stream = { version = "0.1", features = ["net"] }
-futures = { version = "0.3", default-features = false, features = ["alloc"] }
-futures-util = "0.3"
+
 [build-dependencies]
 tonic-build = "0.7"

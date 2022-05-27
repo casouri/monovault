@@ -48,9 +48,9 @@ fn main() {
     let mut vaults: Vec<VaultRef> = vec![];
     let local_vault = LocalVault::new(&config.local_vault_name, &db_path)
         .expect("Cannot create local vault instance");
-    let local_vault_ref: Arc<Mutex<Box<dyn Vault>>> = Arc::new(Mutex::new(Box::new(local_vault)));
+    let local_vault_arc: VaultRef = Arc::new(Mutex::new(Box::new(local_vault)));
 
-    vaults.push(Arc::clone(&local_vault_ref));
+    vaults.push(Arc::clone(&local_vault_arc));
 
     // Create remote vaults.
     for (peer_name, peer_address) in config.peers {
@@ -74,7 +74,7 @@ fn main() {
     // TODO: Add restart?
     if config.share_local_vault {
         let addr = config.my_address.clone();
-        let vault_ref = Arc::clone(&local_vault_ref);
+        let vault_ref = Arc::clone(&local_vault_arc);
         let _server_handle = thread::spawn(move || run_server(&addr, vault_ref));
     }
 

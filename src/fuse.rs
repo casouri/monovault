@@ -1,5 +1,4 @@
-// Implement the FUSE API.
-
+/// Implement the FUSE API.
 use crate::types::*;
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,

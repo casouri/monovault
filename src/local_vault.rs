@@ -1,5 +1,4 @@
-// Implementation of Vault trait that actually stores files to disk.
-
+/// Implementation of Vault trait that actually stores files to disk.
 use crate::database::Database;
 use crate::types::*;
 use log::{debug, info};

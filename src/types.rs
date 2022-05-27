@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 use std::boxed::Box;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,6 +12,11 @@ pub type Inode = u64;
 pub type VaultRef = Arc<Mutex<Box<dyn Vault>>>;
 
 pub type VaultResult<T> = std::result::Result<T, VaultError>;
+
+/// 100 network MB. Packets are split into packets on wire, this chunk
+/// size limit is just for saving memory. (Once we implement chunked
+/// read & write.)
+pub const GRPC_DATA_CHUNK_SIZE: usize = 1000000 * 100;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
@@ -111,7 +117,7 @@ impl From<tonic::transport::Error> for VaultError {
 }
 
 /// A generic vault, can be either a local vault or a remote vault.
-pub trait Vault: Send {
+pub trait Vault: Send + Any {
     /// Return the name of the vault.
     fn name(&self) -> String;
     fn tear_down(&mut self) -> VaultResult<()> {
