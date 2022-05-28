@@ -1,24 +1,12 @@
+use crate::background_worker::{BackgroundLog, BackgroundOp, BackgroundWorker};
 /// The caching vault first replicates data locally and send read/write
 /// request to remote vault in the background.
-use crate::local_vault::{LocalVault, RefCounter};
+use crate::local_vault::LocalVault;
 use crate::types::*;
-use log::{debug, error, info};
-use std::fs::File;
-use std::io::Read;
+use log::{debug, info};
 use std::path::Path;
-use std::path::PathBuf;
-use std::sync::mpsc::Sender;
-use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time;
-
-#[derive(Debug, Clone)]
-pub enum BackgroundOp {
-    Delete(Inode),
-    Create(Inode, String, VaultFileType),
-    Upload(Inode, PathBuf),
-}
 
 pub struct CachingVault {
     /// Name of this vault, should be the same as the remote vault.
@@ -29,10 +17,7 @@ pub struct CachingVault {
     local: Arc<Mutex<LocalVault>>,
     /// The remote vault we are using.
     remote: VaultRef,
-    /// Path to the graveyard: where we store files that lost write
-    /// conflict.
-    graveyard: PathBuf,
-    background_channel: Sender<BackgroundOp>,
+    log: BackgroundLog,
     /// Whether allow disconnected delete.
     allow_disconnected_delete: bool,
     /// Whether to allow disconnected create.
@@ -51,14 +36,20 @@ impl CachingVault {
         if !graveyard.exists() {
             std::fs::create_dir(&graveyard)?
         }
+        let log = Arc::new(Mutex::new(vec![]));
         let local = Arc::new(Mutex::new(LocalVault::new(&name, store_path)?));
-        let (sender, recver) = channel();
+        let mut background_worker = BackgroundWorker::new(
+            Arc::clone(&local),
+            Arc::clone(&remote_vault),
+            Arc::clone(&log),
+            &graveyard,
+        );
+        let _handler = thread::spawn(move || background_worker.run());
         Ok(CachingVault {
             name,
             local: Arc::clone(&local),
             remote: Arc::clone(&remote_vault),
-            graveyard,
-            background_channel: sender,
+            log,
             allow_disconnected_delete,
             allow_disconnected_create,
         })
@@ -70,53 +61,6 @@ fn rpc_err_to_option<T>(result: VaultResult<T>) -> VaultResult<Option<T>> {
         Ok(val) => Ok(Some(val)),
         Err(VaultError::RpcError(_)) => Ok(None),
         Err(err) => Err(err),
-    }
-}
-
-fn run_background(remote: VaultRef, recver: Receiver<BackgroundOp>) {
-    loop {
-        match recver.recv() {
-            Ok(op) => loop {
-                match op {
-                    BackgroundOp::Delete(file) => match remote.lock().unwrap().delete(file) {
-                        Ok(_) => break,
-                        Err(VaultError::RpcError(err)) => {
-                            info!(
-                                "Background delete({}) => cannot connect to remote vault, retry in a sec",
-                                file
-                            );
-                            thread::sleep(time::Duration::new(3, 0));
-                        }
-                        Err(err) => {
-                            error!("Background delete({}) => {:?}", file, err);
-                        }
-                    },
-                    BackgroundOp::Create(parent, ref name, kind) => {
-                        match remote.lock().unwrap().create(parent, &name, kind) {
-                            Ok(_) => break,
-                            Err(VaultError::RpcError(err)) => {
-                                info!(
-                                    "Background create(parent={}, child={}, kind={:?}) => cannot connect to remote vault, retry in a sec",
-                                    parent, name, kind
-                                );
-                                thread::sleep(time::Duration::new(3, 0));
-                            }
-                            Err(err) => {
-                                error!(
-                                    "Background create(parent={}, child={}, kind={:?}) => {:?}",
-                                    parent, name, kind, err
-                                );
-                            }
-                        }
-                    }
-                    BackgroundOp::Upload(file, ref path) => (),
-                }
-            },
-            Err(err) => {
-                error!("Background helper channel closed, are we done?");
-                return;
-            }
-        }
     }
 }
 
@@ -231,30 +175,16 @@ impl Vault for CachingVault {
         if count != 0 {
             return Ok(());
         }
-        // Yes, perform close. FIXME: do things in background.
-        // Duplicate the file to graveyard for 1) sole access 2)
-        // it's going to the graveyard if write conflict occurs
-        // anyway.
+        // Yes, perform close.
         let info = self.local.lock().unwrap().attr(file)?;
         debug!(
             "write: inode={}, name={}, size={}, atime={}, mtime={}, kind={:?}",
             info.inode, info.name, info.size, info.atime, info.mtime, info.kind
         );
-        let vault_name = self.remote.lock().unwrap().name();
-        // We don't include the version in the name, so consecutive
-        // closes on the same file produce only one copy.
-        let graveyard_file_path = self.graveyard.join(format!(
-            "vault({})name({})inode({})",
-            vault_name, info.name, file
-        ));
-        debug!("write: copy to {}", graveyard_file_path.to_string_lossy());
-        self.local
+        self.log
             .lock()
             .unwrap()
-            .cache_copy_file(file, &graveyard_file_path)?;
-        self.background_channel
-            .send(BackgroundOp::Upload(file, graveyard_file_path))
-            .unwrap();
+            .push(BackgroundOp::Upload(file, info.name));
         Ok(())
     }
 
@@ -269,9 +199,10 @@ impl Vault for CachingVault {
                     "create(parent={}, name={}, kind={:?}) => remote disconnect, creating locally",
                     parent, name, kind
                 );
-                self.background_channel
-                    .send(BackgroundOp::Create(parent, name.to_string(), kind))
-                    .unwrap();
+                self.log
+                    .lock()
+                    .unwrap()
+                    .push(BackgroundOp::Create(parent, name.to_string(), kind));
                 self.local.lock().unwrap().create(parent, name, kind)
             }
             // Other error.
@@ -292,9 +223,7 @@ impl Vault for CachingVault {
             // Disconnected.
             Err(VaultError::RpcError(_)) if self.allow_disconnected_delete => {
                 info!("delete({}) => remote disconnected, deleting locally", file);
-                self.background_channel
-                    .send(BackgroundOp::Delete(file))
-                    .unwrap();
+                self.log.lock().unwrap().push(BackgroundOp::Delete(file));
                 self.local.lock().unwrap().delete(file)
             }
             // Other error.
@@ -338,14 +267,4 @@ impl Vault for CachingVault {
         // Remote doesn't need tear down.
         self.local.lock().unwrap().tear_down()
     }
-}
-
-fn upload_file(file: Inode, path: &Path, dest: &mut Box<dyn Vault>) -> VaultResult<u32> {
-    // FIXME: Transfer by chunks.
-    let mut fd = File::open(path)?;
-    let mut buf = vec![];
-    fd.read_to_end(&mut buf)?;
-    dest.write(file, 0, &buf)?;
-    std::fs::remove_file(path)?;
-    Ok(buf.len() as u32)
 }

@@ -1,16 +1,15 @@
+use crate::caching_remote::CachingVault;
+use crate::local_vault::LocalVault;
+use crate::remote_vault::RemoteVault;
 use serde::{Deserialize, Serialize};
-use std::any::Any;
-use std::boxed::Box;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time;
 
 pub type VaultName = String;
 pub type VaultAddress = String;
 pub type Inode = u64;
-pub type VaultRef = Arc<Mutex<Box<dyn Vault>>>;
-
+pub type VaultRef = Arc<Mutex<GenericVault>>;
 pub type VaultResult<T> = std::result::Result<T, VaultError>;
 
 /// 100 network MB. Packets are split into packets on wire, this chunk
@@ -42,7 +41,7 @@ pub struct Config {
     pub allow_disconnected_create: bool,
     /// Wait this long between each background synchronization to
     /// remote vaults.
-    pub background_update_interval: f32,
+    pub background_update_interval: u8,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
@@ -117,7 +116,7 @@ impl From<tonic::transport::Error> for VaultError {
 }
 
 /// A generic vault, can be either a local vault or a remote vault.
-pub trait Vault: Send + Any {
+pub trait Vault: Send {
     /// Return the name of the vault.
     fn name(&self) -> String;
     fn tear_down(&mut self) -> VaultResult<()> {
@@ -141,4 +140,84 @@ pub trait Vault: Send + Any {
     /// List directory entries of `dir`. The listing includes "." and
     /// "..", but if `dir` is vault root, ".." is not included.
     fn readdir(&mut self, dir: Inode) -> VaultResult<Vec<FileInfo>>;
+}
+
+pub enum GenericVault {
+    Local(LocalVault),
+    Remote(RemoteVault),
+    Caching(CachingVault),
+}
+
+impl Vault for GenericVault {
+    fn name(&self) -> String {
+        match self {
+            GenericVault::Local(vault) => vault.name(),
+            GenericVault::Remote(vault) => vault.name(),
+            GenericVault::Caching(vault) => vault.name(),
+        }
+    }
+
+    fn attr(&mut self, file: Inode) -> VaultResult<FileInfo> {
+        match self {
+            GenericVault::Local(vault) => vault.attr(file),
+            GenericVault::Remote(vault) => vault.attr(file),
+            GenericVault::Caching(vault) => vault.attr(file),
+        }
+    }
+
+    fn read(&mut self, file: Inode, offset: i64, size: u32) -> VaultResult<Vec<u8>> {
+        match self {
+            GenericVault::Local(vault) => vault.read(file, offset, size),
+            GenericVault::Remote(vault) => vault.read(file, offset, size),
+            GenericVault::Caching(vault) => vault.read(file, offset, size),
+        }
+    }
+
+    fn write(&mut self, file: Inode, offset: i64, data: &[u8]) -> VaultResult<u32> {
+        match self {
+            GenericVault::Local(vault) => vault.write(file, offset, data),
+            GenericVault::Remote(vault) => vault.write(file, offset, data),
+            GenericVault::Caching(vault) => vault.write(file, offset, data),
+        }
+    }
+
+    fn create(&mut self, parent: Inode, name: &str, kind: VaultFileType) -> VaultResult<Inode> {
+        match self {
+            GenericVault::Local(vault) => vault.create(parent, name, kind),
+            GenericVault::Remote(vault) => vault.create(parent, name, kind),
+            GenericVault::Caching(vault) => vault.create(parent, name, kind),
+        }
+    }
+
+    fn open(&mut self, file: Inode, mode: OpenMode) -> VaultResult<()> {
+        match self {
+            GenericVault::Local(vault) => vault.open(file, mode),
+            GenericVault::Remote(vault) => vault.open(file, mode),
+            GenericVault::Caching(vault) => vault.open(file, mode),
+        }
+    }
+
+    fn close(&mut self, file: Inode) -> VaultResult<()> {
+        match self {
+            GenericVault::Local(vault) => vault.close(file),
+            GenericVault::Remote(vault) => vault.close(file),
+            GenericVault::Caching(vault) => vault.close(file),
+        }
+    }
+
+    fn delete(&mut self, file: Inode) -> VaultResult<()> {
+        match self {
+            GenericVault::Local(vault) => vault.delete(file),
+            GenericVault::Remote(vault) => vault.delete(file),
+            GenericVault::Caching(vault) => vault.delete(file),
+        }
+    }
+
+    fn readdir(&mut self, dir: Inode) -> VaultResult<Vec<FileInfo>> {
+        match self {
+            GenericVault::Local(vault) => vault.readdir(dir),
+            GenericVault::Remote(vault) => vault.readdir(dir),
+            GenericVault::Caching(vault) => vault.readdir(dir),
+        }
+    }
 }

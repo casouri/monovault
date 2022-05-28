@@ -1,3 +1,4 @@
+pub mod background_worker;
 pub mod caching_remote;
 pub mod database;
 pub mod fuse;

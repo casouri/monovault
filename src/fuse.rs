@@ -4,7 +4,7 @@ use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, ReplyOpen, ReplyWrite, Request,
 };
-use log::{debug, error, info, log, warn};
+use log::{debug, error, info, log};
 use std::boxed::Box;
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -28,9 +28,9 @@ use std::time;
 pub struct FS {
     /// The order of the vaults in this vector cannot change for the
     /// duration of running.
-    vaults: Vec<Arc<Mutex<Box<dyn Vault>>>>,
+    vaults: HashMap<String, VaultRef>,
     /// Maps inode to its belonging vault.
-    vault_map: HashMap<u64, Arc<Mutex<Box<dyn Vault>>>>,
+    vault_map: HashMap<u64, RemoteVaultRef>,
     /// The base inode for each vault.
     vault_base_map: HashMap<String, u64>,
 }
@@ -407,10 +407,12 @@ impl Filesystem for FS {
     fn destroy(&mut self) {
         info!("destroy()");
         for vault_lck in &self.vaults {
-            let mut vault = vault_lck.lock().unwrap();
-            match vault.tear_down() {
-                Ok(_) => (),
-                Err(err) => error!("destroy() => vault {} {:?}", vault.name(), err),
+            match vault_lck.lock() {
+                Ok(mut vault) => match vault.tear_down() {
+                    Ok(_) => (),
+                    Err(err) => error!("destroy() => vault {} {:?}", vault.name(), err),
+                },
+                Err(_) => (),
             }
         }
     }

@@ -2,7 +2,6 @@ use crate::types::*;
 use log::{debug, info};
 use rusqlite::params;
 use std::path::{Path, PathBuf};
-use std::time;
 
 /// Database is used for maintaining meta information, eg, which files
 /// are contained in a directory, what's the type of each file

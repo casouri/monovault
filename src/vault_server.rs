@@ -1,6 +1,6 @@
 /// A gRPC server that receives requests and uses local_vault to do the
 /// actual work.
-use crate::local_vault::LocalVault;
+use crate::local_vault::unwrap_vault;
 use crate::rpc::vault_rpc_server;
 use crate::rpc::vault_rpc_server::VaultRpc;
 use crate::rpc::{
@@ -9,8 +9,7 @@ use crate::rpc::{
 };
 use crate::types::{OpenMode, Vault, VaultFileType, VaultRef, VaultResult, GRPC_DATA_CHUNK_SIZE};
 use async_trait::async_trait;
-use log::{debug, info};
-use std::any::Any;
+use log::info;
 use tokio::net::TcpListener;
 use tokio::runtime::Builder;
 use tokio::sync::mpsc;
@@ -48,11 +47,6 @@ fn num2kind(k: i32) -> VaultFileType {
     } else {
         return VaultFileType::Directory;
     }
-}
-
-fn unwrap_vault<'a>(vault: &'a mut Box<dyn Vault>) -> &'a mut LocalVault {
-    let vault = &mut *vault as &mut dyn Any;
-    vault.downcast_mut::<LocalVault>().unwrap()
 }
 
 impl VaultServer {
@@ -140,6 +134,7 @@ impl VaultRpc for VaultServer {
             offset = file.offset;
             data.append(&mut file.data);
         }
+        // FIXME: write to tmp file by chunk so we don't eat memory.
         // This way we don't lock the vault when transferring packets on wire.
         let mut vault_lck = self.local_vault.lock().unwrap();
         let vault = unwrap_vault(&mut vault_lck);
