@@ -2,7 +2,6 @@
 use crate::database::Database;
 use crate::types::*;
 use log::{debug, info};
-use std::any::Any;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -19,11 +18,6 @@ use std::time;
 #[derive(Debug)]
 pub struct RefCounter {
     ref_count: Mutex<HashMap<Inode, u64>>,
-}
-
-pub fn unwrap_vault<'a>(vault: &'a mut Box<dyn Vault>) -> &'a mut LocalVault {
-    let vault = &mut *vault as &mut dyn Any;
-    vault.downcast_mut::<LocalVault>().unwrap()
 }
 
 impl RefCounter {

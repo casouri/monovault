@@ -1,13 +1,16 @@
+use std::collections::HashMap;
+
 /// A gRPC server that receives requests and uses local_vault to do the
 /// actual work.
-use crate::local_vault::unwrap_vault;
 use crate::rpc::vault_rpc_server;
 use crate::rpc::vault_rpc_server::VaultRpc;
 use crate::rpc::{
     DataChunk, DirEntryList, Empty, FileInfo, FileToCreate, FileToOpen, FileToRead, FileToWrite,
     Inode, Size,
 };
-use crate::types::{OpenMode, Vault, VaultFileType, VaultRef, VaultResult, GRPC_DATA_CHUNK_SIZE};
+use crate::types::{
+    OpenMode, Vault, VaultError, VaultFileType, VaultRef, VaultResult, GRPC_DATA_CHUNK_SIZE,
+};
 use async_trait::async_trait;
 use log::info;
 use tokio::net::TcpListener;
@@ -16,9 +19,13 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-pub fn run_server(address: &str, local_vault: VaultRef) -> VaultResult<()> {
+pub fn run_server(
+    address: &str,
+    local_name: &str,
+    vault_map: HashMap<String, VaultRef>,
+) -> VaultResult<()> {
     let rt = Builder::new_multi_thread().enable_all().build().unwrap();
-    let service = vault_rpc_server::VaultRpcServer::new(VaultServer::new(local_vault));
+    let service = vault_rpc_server::VaultRpcServer::new(VaultServer::new(local_name, vault_map)?);
     let server = tonic::transport::Server::builder().add_service(service.clone());
     let incoming = match rt.block_on(TcpListener::bind(address)) {
         Ok(lis) => tokio_stream::wrappers::TcpListenerStream::new(lis),
@@ -30,7 +37,8 @@ pub fn run_server(address: &str, local_vault: VaultRef) -> VaultResult<()> {
 }
 
 pub struct VaultServer {
-    local_vault: VaultRef,
+    vault_map: HashMap<String, VaultRef>,
+    local_name: String,
 }
 
 fn kind2num(v: VaultFileType) -> i32 {
@@ -50,8 +58,19 @@ fn num2kind(k: i32) -> VaultFileType {
 }
 
 impl VaultServer {
-    pub fn new(local_vault: VaultRef) -> VaultServer {
-        VaultServer { local_vault }
+    /// `vault_map` should contain all the remote and local vault.
+    pub fn new(local_name: &str, vault_map: HashMap<String, VaultRef>) -> VaultResult<VaultServer> {
+        if vault_map.get(local_name).is_none() {
+            return Err(VaultError::CannotFindVaultByName(local_name.to_string()));
+        }
+        Ok(VaultServer {
+            local_name: local_name.to_string(),
+            vault_map,
+        })
+    }
+
+    fn local(&self) -> &VaultRef {
+        self.vault_map.get(&self.local_name).unwrap()
     }
 }
 
@@ -60,7 +79,7 @@ impl VaultRpc for VaultServer {
     async fn attr(&self, request: Request<Inode>) -> Result<Response<FileInfo>, Status> {
         let inner = request.into_inner();
         info!("attr({})", inner.value);
-        let res = self.local_vault.lock().unwrap().attr(inner.value);
+        let res = self.local().lock().unwrap().attr(inner.value);
         match res {
             Ok(v) => Ok(Response::new(FileInfo {
                 inode: v.inode,
@@ -86,8 +105,7 @@ impl VaultRpc for VaultServer {
         );
         // Don't lock the vault when transferring data on wire.
         let res = {
-            let mut vault_lck = self.local_vault.lock().unwrap();
-            let vault = unwrap_vault(&mut vault_lck);
+            let mut vault = self.local().lock().unwrap();
             vault.read(request_inner.file, request_inner.offset, request_inner.size)
         };
         match res {
@@ -136,8 +154,7 @@ impl VaultRpc for VaultServer {
         }
         // FIXME: write to tmp file by chunk so we don't eat memory.
         // This way we don't lock the vault when transferring packets on wire.
-        let mut vault_lck = self.local_vault.lock().unwrap();
-        let vault = unwrap_vault(&mut vault_lck);
+        let mut vault = self.local().lock().unwrap();
         match vault.write(inode, offset, &data) {
             Ok(v) => size += v,
             Err(_) => return Err(Status::unknown("Function write in VaultServer failed!")),
@@ -153,8 +170,7 @@ impl VaultRpc for VaultServer {
             request_inner.name.as_str(),
             num2kind(request_inner.kind),
         );
-        let mut vault_lck = self.local_vault.lock().unwrap();
-        let vault = unwrap_vault(&mut vault_lck);
+        let mut vault = self.local().lock().unwrap();
         let res = vault.create(
             request_inner.parent,
             request_inner.name.as_str(),
@@ -172,8 +188,7 @@ impl VaultRpc for VaultServer {
             _option => OpenMode::RW,
         };
         info!("open(file={}, mode={:?})", request_inner.file, mode);
-        let mut vault_lck = self.local_vault.lock().unwrap();
-        let vault = unwrap_vault(&mut vault_lck);
+        let mut vault = self.local().lock().unwrap();
         match vault.open(request_inner.file, mode) {
             Ok(v) => Ok(Response::new(Empty {})),
             Err(_) => Err(Status::unknown("Function open in VaultServer failed!")),
@@ -182,8 +197,7 @@ impl VaultRpc for VaultServer {
     async fn close(&self, request: Request<Inode>) -> Result<Response<Empty>, Status> {
         let inner = request.into_inner();
         info!("close({})", inner.value);
-        let mut vault_lck = self.local_vault.lock().unwrap();
-        let vault = unwrap_vault(&mut vault_lck);
+        let mut vault = self.local().lock().unwrap();
         match vault.close(inner.value) {
             Ok(_) => Ok(Response::new(Empty {})),
             Err(_) => Err(Status::unknown("Function close in VaultServer failed!")),
@@ -192,8 +206,7 @@ impl VaultRpc for VaultServer {
     async fn delete(&self, request: Request<Inode>) -> Result<Response<Empty>, Status> {
         let inner = request.into_inner();
         info!("delete({})", inner.value);
-        let mut vault_lck = self.local_vault.lock().unwrap();
-        let vault = unwrap_vault(&mut vault_lck);
+        let mut vault = self.local().lock().unwrap();
         match vault.delete(inner.value) {
             Ok(_) => Ok(Response::new(Empty {})),
             Err(_) => Err(Status::unknown("Function delete in VaultServer failed!")),
@@ -202,8 +215,7 @@ impl VaultRpc for VaultServer {
     async fn readdir(&self, request: Request<Inode>) -> Result<Response<DirEntryList>, Status> {
         let inner = request.into_inner();
         info!("readdir({})", inner.value);
-        let mut vault_lck = self.local_vault.lock().unwrap();
-        let vault = unwrap_vault(&mut vault_lck);
+        let mut vault = self.local().lock().unwrap();
         match vault.readdir(inner.value) {
             Ok(v) => Ok(Response::new(DirEntryList {
                 list: v

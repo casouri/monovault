@@ -4,6 +4,7 @@ use crate::background_worker::{BackgroundLog, BackgroundOp, BackgroundWorker};
 use crate::local_vault::LocalVault;
 use crate::types::*;
 use log::{debug, info};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -16,7 +17,7 @@ pub struct CachingVault {
     /// A local vault that is used to manage local copies.
     local: Arc<Mutex<LocalVault>>,
     /// The remote vault we are using.
-    remote: VaultRef,
+    remote_map: HashMap<String, VaultRef>,
     log: BackgroundLog,
     /// Whether allow disconnected delete.
     allow_disconnected_delete: bool,
@@ -25,34 +26,49 @@ pub struct CachingVault {
 }
 
 impl CachingVault {
+    /// The caching remote takes all the remotes rather than only the
+    /// one it represents, because we want to be able savage from
+    /// other vaults (asking B if it has a file of A cached).
+    /// `remote_name` is the name of the vault this caching remote
+    /// represents. `store_path` is the path to where we store
+    /// database and data files. `remote_map` should contain all
+    /// the remotes.
     pub fn new(
-        remote_vault: VaultRef,
+        remote_name: &str,
+        remote_map: HashMap<String, VaultRef>,
         store_path: &Path,
         allow_disconnected_delete: bool,
         allow_disconnected_create: bool,
     ) -> VaultResult<CachingVault> {
-        let name = remote_vault.lock().unwrap().name();
+        // Produce arguments for the background worker.
         let graveyard = store_path.join("graveyard");
         if !graveyard.exists() {
             std::fs::create_dir(&graveyard)?
         }
         let log = Arc::new(Mutex::new(vec![]));
-        let local = Arc::new(Mutex::new(LocalVault::new(&name, store_path)?));
+        let local = Arc::new(Mutex::new(LocalVault::new(remote_name, store_path)?));
+        let our_remote = remote_map
+            .get(remote_name)
+            .ok_or(VaultError::CannotFindVaultByName(remote_name.to_string()))?;
         let mut background_worker = BackgroundWorker::new(
             Arc::clone(&local),
-            Arc::clone(&remote_vault),
+            Arc::clone(our_remote),
             Arc::clone(&log),
             &graveyard,
         );
         let _handler = thread::spawn(move || background_worker.run());
         Ok(CachingVault {
-            name,
-            local: Arc::clone(&local),
-            remote: Arc::clone(&remote_vault),
+            name: remote_name.to_string(),
+            local,
+            remote_map,
             log,
             allow_disconnected_delete,
             allow_disconnected_create,
         })
+    }
+
+    fn main(&self) -> VaultRef {
+        Arc::clone(self.remote_map.get(&self.name).unwrap())
     }
 }
 
@@ -71,7 +87,7 @@ impl Vault for CachingVault {
 
     fn attr(&mut self, file: Inode) -> VaultResult<FileInfo> {
         info!("attr({})", file);
-        match self.remote.lock().unwrap().attr(file) {
+        match self.main().lock().unwrap().attr(file) {
             // Connected.
             Ok(info) => Ok(info),
             // Disconnected.
@@ -118,9 +134,8 @@ impl Vault for CachingVault {
         // listed file to local vault (but don't fetch file data).
         // Now, the data is either not fetched (version = 0), or
         // out-of-date (version too low), or up-to-date.
-        let remote = &mut self.remote.lock().unwrap();
         let local = &mut self.local.lock().unwrap();
-        match connected_case(local, remote, file) {
+        match connected_case(local, self.main(), file) {
             Ok(()) => return Ok(()),
             Err(VaultError::RpcError(err)) => {
                 return disconnected_case(local, file, VaultError::RpcError(err))
@@ -130,9 +145,10 @@ impl Vault for CachingVault {
         // Download remote content if we are out-of-date.
         fn connected_case(
             local: &mut LocalVault,
-            remote: &mut Box<dyn Vault>,
+            remote: VaultRef,
             file: Inode,
         ) -> VaultResult<()> {
+            let mut remote = remote.lock().unwrap();
             let remote_meta = remote.attr(file)?;
             let our_version = local.attr(file)?.version;
             if our_version < remote_meta.version {
@@ -190,7 +206,7 @@ impl Vault for CachingVault {
 
     fn create(&mut self, parent: Inode, name: &str, kind: VaultFileType) -> VaultResult<Inode> {
         info!("create(parent={}, name={}, kind={:?})", parent, name, kind);
-        let inode = match self.remote.lock().unwrap().create(parent, name, kind) {
+        let inode = match self.main().lock().unwrap().create(parent, name, kind) {
             // Connected.
             Ok(inode) => Ok(inode),
             // Disconnected.
@@ -217,7 +233,7 @@ impl Vault for CachingVault {
         info!("delete({})", file);
         // We don't wait for when ref_count reaches 0. Remote and
         // local vault will handle that.
-        match self.remote.lock().unwrap().delete(file) {
+        match self.main().lock().unwrap().delete(file) {
             // Connected.
             Ok(_) => self.local.lock().unwrap().delete(file),
             // Disconnected.
@@ -233,7 +249,7 @@ impl Vault for CachingVault {
 
     fn readdir(&mut self, dir: Inode) -> VaultResult<Vec<FileInfo>> {
         info!("readdir({})", dir);
-        match self.remote.lock().unwrap().readdir(dir) {
+        match self.main().lock().unwrap().readdir(dir) {
             // Remote is accessible.
             Ok(entries) => {
                 for info in entries {

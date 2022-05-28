@@ -26,16 +26,13 @@ use std::time;
 // vault, we translate it into the global inode by slapping the
 // vault's prefix onto it.
 pub struct FS {
-    /// The order of the vaults in this vector cannot change for the
-    /// duration of running.
-    vaults: HashMap<String, VaultRef>,
+    /// A vector of all the vaults, this is just for `readdir_vaults`.
+    vaults: Vec<VaultRef>,
     /// Maps inode to its belonging vault.
-    vault_map: HashMap<u64, RemoteVaultRef>,
+    vault_map: HashMap<u64, VaultRef>,
     /// The base inode for each vault.
     vault_base_map: HashMap<String, u64>,
 }
-
-type VaultLck = Arc<Mutex<Box<dyn Vault>>>;
 
 /// Return a dummy timestamp.
 fn ts() -> time::SystemTime {
@@ -122,21 +119,19 @@ fn venial_error_p(err: &VaultError) -> bool {
 }
 
 impl FS {
-    pub fn new(vaults: Vec<VaultLck>) -> FS {
+    pub fn new(vaults: Vec<VaultRef>) -> FS {
         let mut vault_map = HashMap::new();
         let mut vault_base_map = HashMap::new();
-        let mut vault_refs = vec![];
         let mut base = 1;
-        for vault_lck in vaults {
-            let vault = vault_lck.lock().unwrap();
+        for vault_lck in vaults.iter() {
+            let vault_name = vault_lck.lock().unwrap().name();
             let vault_base = base * (2 as u64).pow(48);
-            vault_base_map.insert(vault.name(), vault_base);
+            vault_base_map.insert(vault_name, vault_base);
             vault_map.insert(1 + vault_base, Arc::clone(&vault_lck));
-            vault_refs.push(Arc::clone(&vault_lck));
             base += 1;
         }
         FS {
-            vaults: vault_refs,
+            vaults,
             vault_map,
             vault_base_map,
         }
@@ -163,7 +158,7 @@ impl FS {
         result
     }
 
-    fn get_vault(&self, inode: u64) -> VaultResult<VaultLck> {
+    fn get_vault(&self, inode: u64) -> VaultResult<VaultRef> {
         if let Some(vault) = self.vault_map.get(&inode) {
             Ok(Arc::clone(vault))
         } else {

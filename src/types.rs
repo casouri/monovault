@@ -83,6 +83,7 @@ pub enum VaultError {
     // from a remove vault. They are returned normally if from a local
     // vault.
     NoCorrespondingVault(Inode),
+    CannotFindVaultByName(String),
     U64Overflow(u64),
     U64Underflow(u64),
     WriteConflict(Inode, u64, u64),
