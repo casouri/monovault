@@ -1,0 +1,31 @@
+#!/bin/bash
+
+DB1="db"
+DB2="db2"
+MOUNT1="mount"
+MOUNT2="mount2"
+VAULT1="yuan"
+VAULT2="alice"
+
+if [ $1 == "reset" ]
+then
+    rm -r "${DB1}/*"
+    rm -r "${DB2}/*"
+fi
+
+if [ $1 == "umount" ]
+then
+    umount -f "${MOUNT1}"
+    umount -f "${MOUNT2}"
+fi
+
+if [ $1 == "pop" ]
+then
+    mkdir "${MOUNT1}/${VAULT1}/d1"
+    echo 'woome' >"${MOUNT1}/${VAULT1}/f1"
+    echo 'veemo' >"${MOUNT1}/${VAULT1}/d1/f1"
+
+    mkdir "${MOUNT1}/${VAULT2}/d1"
+    echo 'woome' >"${MOUNT1}/${VAULT2}/f1"
+    echo 'veemo' >"${MOUNT1}/${VAULT2}/d1/f1"
+fi
