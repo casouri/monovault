@@ -106,7 +106,17 @@ impl Iterator for WriteIterator {
 fn translate_result<T>(res: Result<T, Status>) -> VaultResult<T> {
     match res {
         Ok(val) => Ok(val),
-        Err(status) => Err(VaultError::RemoteError(format!("{:?}", status))),
+        Err(status) => Err(unpack_status(status)),
+    }
+}
+
+fn unpack_status(status: Status) -> VaultError {
+    if status.code() == tonic::Code::Unknown {
+        let compressed: CompressedError = serde_json::from_str(status.message()).unwrap();
+        let err: VaultError = compressed.into();
+        err
+    } else {
+        VaultError::RemoteError("unkown".to_string())
     }
 }
 

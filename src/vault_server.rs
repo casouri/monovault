@@ -9,7 +9,8 @@ use crate::rpc::{
     Inode, Size,
 };
 use crate::types::{
-    OpenMode, Vault, VaultError, VaultFileType, VaultRef, VaultResult, GRPC_DATA_CHUNK_SIZE,
+    CompressedError, OpenMode, Vault, VaultError, VaultFileType, VaultRef, VaultResult,
+    GRPC_DATA_CHUNK_SIZE,
 };
 use async_trait::async_trait;
 use log::{debug, info};
@@ -17,7 +18,7 @@ use tokio::net::TcpListener;
 use tokio::runtime::Builder;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::{Request, Response, Status, Streaming};
+use tonic::{Code, Request, Response, Status, Streaming};
 
 pub fn run_server(address: &str, local_name: &str, vault_map: HashMap<String, VaultRef>) {
     let rt = Builder::new_multi_thread().enable_all().build().unwrap();
@@ -62,9 +63,14 @@ fn num2kind(k: i32) -> VaultFileType {
 fn translate_result<T>(res: VaultResult<T>) -> Result<T, Status> {
     match res {
         Ok(val) => Ok(val),
-        // FIXME: perserve error.
-        Err(err) => Err(Status::unknown(format!("{:?}", err))),
+        Err(err) => Err(pack_status(err)),
     }
+}
+
+fn pack_status(err: VaultError) -> Status {
+    let compressed_err: CompressedError = err.into();
+    let encoded = serde_json::to_string(&compressed_err).unwrap();
+    Status::unknown(encoded)
 }
 
 impl VaultServer {

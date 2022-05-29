@@ -116,6 +116,62 @@ impl From<tonic::transport::Error> for VaultError {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum CompressedError {
+    FileNameTooLong(String),
+    FileNotExist(Inode),
+    NotDirectory(Inode),
+    IsDirectory(Inode),
+    DirectoryNotEmpty(Inode),
+    CannotFindVaultByName(String),
+    FileAlreadyExist(Inode, String),
+    Misc(String),
+}
+
+impl From<VaultError> for CompressedError {
+    fn from(err: VaultError) -> Self {
+        match err {
+            VaultError::FileNameTooLong(name) => CompressedError::FileNameTooLong(name),
+            VaultError::FileNotExist(inode) => CompressedError::FileNotExist(inode),
+            VaultError::NotDirectory(inode) => CompressedError::NotDirectory(inode),
+            VaultError::IsDirectory(inode) => CompressedError::IsDirectory(inode),
+            VaultError::DirectoryNotEmpty(inode) => CompressedError::DirectoryNotEmpty(inode),
+            VaultError::SqliteError(err) => CompressedError::Misc(format!("{}", err)),
+            VaultError::NoCorrespondingVault(err) => CompressedError::Misc(format!("{}", err)),
+            VaultError::U64Overflow(err) => CompressedError::Misc(format!("{}", err)),
+            VaultError::U64Underflow(err) => CompressedError::Misc(format!("{}", err)),
+            VaultError::RemoteError(err) => CompressedError::Misc(format!("{}", err)),
+            VaultError::FileAlreadyExist(inode, name) => {
+                CompressedError::FileAlreadyExist(inode, name)
+            }
+            VaultError::CannotFindVaultByName(name) => CompressedError::CannotFindVaultByName(name),
+            VaultError::WriteConflict(err0, err1, err2) => {
+                CompressedError::Misc(format!("{}, {}, {}", err0, err1, err2))
+            }
+            VaultError::SystemTimeError(err) => CompressedError::Misc(format!("{}", err)),
+            VaultError::IOError(err) => CompressedError::Misc(format!("{}", err)),
+            VaultError::RpcError(err) => CompressedError::Misc(format!("{}", err)),
+        }
+    }
+}
+
+impl From<CompressedError> for VaultError {
+    fn from(err: CompressedError) -> Self {
+        match err {
+            CompressedError::FileNameTooLong(name) => VaultError::FileNameTooLong(name),
+            CompressedError::FileNotExist(inode) => VaultError::FileNotExist(inode),
+            CompressedError::NotDirectory(inode) => VaultError::NotDirectory(inode),
+            CompressedError::IsDirectory(inode) => VaultError::IsDirectory(inode),
+            CompressedError::DirectoryNotEmpty(inode) => VaultError::DirectoryNotEmpty(inode),
+            CompressedError::CannotFindVaultByName(name) => VaultError::CannotFindVaultByName(name),
+            CompressedError::FileAlreadyExist(inode, name) => {
+                VaultError::FileAlreadyExist(inode, name)
+            }
+            CompressedError::Misc(err) => VaultError::RemoteError(err),
+        }
+    }
+}
+
 /// A generic vault, can be either a local vault or a remote vault.
 pub trait Vault: Send {
     /// Return the name of the vault.
