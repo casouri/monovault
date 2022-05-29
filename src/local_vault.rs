@@ -158,11 +158,10 @@ impl FdMap {
                     .create(true)
                     .read(true)
                     .write(true)
-                    .truncate(true)
+                    .truncate(write)
                     .open(&path)?;
                 // Make sure file is created.
                 fd.flush()?;
-                debug!("file content: {}", std::fs::read_to_string(&path)?);
                 let fd_ref = Arc::new(Mutex::new(fd));
                 map.insert(file, Arc::clone(&fd_ref));
                 Ok(fd_ref)

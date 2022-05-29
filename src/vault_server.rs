@@ -70,7 +70,7 @@ fn translate_result<T>(res: VaultResult<T>) -> Result<T, Status> {
 fn pack_status(err: VaultError) -> Status {
     let compressed_err: CompressedError = err.into();
     let encoded = serde_json::to_string(&compressed_err).unwrap();
-    Status::unknown(encoded)
+    Status::not_found(encoded)
 }
 
 impl VaultServer {

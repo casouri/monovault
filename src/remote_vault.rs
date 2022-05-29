@@ -111,12 +111,12 @@ fn translate_result<T>(res: Result<T, Status>) -> VaultResult<T> {
 }
 
 fn unpack_status(status: Status) -> VaultError {
-    if status.code() == tonic::Code::Unknown {
+    if status.code() == tonic::Code::NotFound {
         let compressed: CompressedError = serde_json::from_str(status.message()).unwrap();
         let err: VaultError = compressed.into();
         err
     } else {
-        VaultError::RemoteError("unkown".to_string())
+        VaultError::RemoteError(status.message().to_string())
     }
 }
 
