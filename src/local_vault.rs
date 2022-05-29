@@ -31,7 +31,6 @@ pub struct FdMap {
     /// expect it to be dropped and the file closed.
     read_map: Mutex<HashMap<Inode, Arc<Mutex<File>>>>,
     write_map: Mutex<HashMap<Inode, Arc<Mutex<File>>>>,
-    len_map: Mutex<HashMap<Inode, u64>>,
 }
 
 /// Local vault delegates metadata work to the database, and mainly
@@ -124,7 +123,6 @@ impl FdMap {
             data_file_dir: data_file_dir.to_path_buf(),
             read_map: Mutex::new(HashMap::new()),
             write_map: Mutex::new(HashMap::new()),
-            len_map: Mutex::new(HashMap::new()),
         }
     }
 
@@ -179,80 +177,19 @@ impl FdMap {
         self.read_map.lock().unwrap().insert(file, write_fd);
     }
 
-    /// Set `file`'s length to `len` if `len` is greater than the
-    /// current len.
-    // pub fn grow_len(&self, file: Inode, len: u64) {
-    //     let current = self.get_len(file);
-    //     if current < len {
-    //         self.len_map.lock().unwrap().insert(file, len);
-    //     }
-    // }
-
-    /// Return `file`'s len.
-    // pub fn get_len(&self, file: Inode) -> u64 {
-    //     match self.len_map.lock().unwrap().get(&file) {
-    //         Some(&len) => len,
-    //         None => 0,
-    //     }
-    // }
-
     /// Drop `file` (and thus saving it to disk).
     pub fn close(&self, file: Inode, modified: bool) -> VaultResult<()> {
-        // let mut read_fd = self.get(file, false)?;
-        // let mut read_buf = String::new();
-        // // read_fd.lock().unwrap().read_to_string(&mut read_buf)?;
-        // read_fd.lock().unwrap().flush()?;
-
-        // let mut write_fd = self.get(file, true)?;
-        // let mut write_buf = String::new();
-        // // write_fd.lock().unwrap().read_to_string(&mut write_buf)?;
-        // write_fd.lock().unwrap().flush()?;
-
-        // debug!("Before close, read copy: {}", read_buf);
-        // debug!("Before close, write copy: {}", write_buf);
-
-        // self.read_map.lock().unwrap().remove(&file);
-        // self.write_map.lock().unwrap().remove(&file);
+        self.read_map.lock().unwrap().remove(&file);
+        self.write_map.lock().unwrap().remove(&file);
 
         if modified {
-            // debug!(
-            //     "Modified, read copy({:?}): {}",
-            //     &self.compose_path(file, false),
-            //     std::fs::read_to_string(self.compose_path(file, false))?
-            // );
-            // debug!(
-            //     "Modified, write copy({:?}): {}",
-            //     &self.compose_path(file, true),
-            //     std::fs::read_to_string(self.compose_path(file, true))?
-            // );
-            // std::fs::copy(
-            //     self.compose_path(file, true),
-            //     self.compose_path(file, false),
-            // )?;
+            std::fs::copy(
+                self.compose_path(file, true),
+                self.compose_path(file, false),
+            )?;
             // If not modified, write is never called, a write copy is
             // never created, and we don't need to delete it.
-            // std::fs::remove_file(self.compose_path(file, true))?;
-
-            // let len = self.get_len(file);
-            // self.len_map.lock().unwrap().insert(file, 0);
-            // debug!("modified, len={}", len);
-
-            // // fd.set_len(len)?;
-            // let tmp_path = std::env::temp_dir().join(file.to_string());
-            // let mut tmp = File::create(&tmp_path)?;
-
-            // let mut buf = vec![0; len as usize];
-            // fd.seek(SeekFrom::Start(0))?;
-            // fd.read_exact(&mut buf)?;
-            // tmp.write_all(&buf)?;
-
-            // drop(tmp);
-            // self.fd_map.lock().unwrap().remove(&file);
-            // drop(fd);
-
-            // std::fs::copy(&tmp_path, self.compose_path(file))?;
-        } else {
-            // self.fd_map.lock().unwrap().remove(&file);
+            std::fs::remove_file(self.compose_path(file, true))?;
         }
         Ok(())
     }
@@ -286,42 +223,33 @@ pub fn attr(file: Inode, database: &mut Database, fd_map: &FdMap) -> VaultResult
 
 /// The `read` function that is used by LocalVault and CachingRemote.
 pub fn read(file: Inode, offset: i64, size: u32, fd_map: &FdMap) -> VaultResult<Vec<u8>> {
-    // let fd_lck = fd_map.get(file, false)?;
-    // let mut fd = fd_lck.lock().unwrap();
-    // let mut buf = vec![0; size as usize];
-    // if offset >= 0 {
-    //     fd.seek(SeekFrom::Start(offset as u64))?;
-    // } else {
-    //     fd.seek(SeekFrom::End(offset))?;
-    // }
-    // // Read exactly SIZE bytes, if not enough, read to EOF but don't
-    // // error.
-    // match fd.read_exact(&mut buf) {
-    //     Ok(()) => Ok(buf),
-    //     Err(err) => {
-    //         if err.kind() == std::io::ErrorKind::UnexpectedEof {
-    //             fd.read_to_end(&mut buf)?;
-    //             Ok(buf)
-    //         } else {
-    //             Err(VaultError::IOError(err))
-    //         }
-    //     }
-    // }
-    let path = fd_map.compose_path(file, false);
-    let mut fd = File::open(&path)?;
-    let file_size = fd.metadata()?.len();
-    let read_size = std::cmp::min(size, file_size.saturating_sub(offset as u64) as u32);
-    let mut buffer = vec![0; read_size as usize];
-    fd.seek(SeekFrom::Start(offset as u64))?;
-    fd.read_exact(&mut buffer)?;
-    Ok(buffer)
+    let fd_lck = fd_map.get(file, false)?;
+    let mut fd = fd_lck.lock().unwrap();
+    let mut buf = vec![0; size as usize];
+    if offset >= 0 {
+        fd.seek(SeekFrom::Start(offset as u64))?;
+    } else {
+        fd.seek(SeekFrom::End(offset))?;
+    }
+    // Read exactly SIZE bytes, if not enough, read to EOF but don't
+    // error.
+    match fd.read_exact(&mut buf) {
+        Ok(()) => Ok(buf),
+        Err(err) => {
+            if err.kind() == std::io::ErrorKind::UnexpectedEof {
+                fd.read_to_end(&mut buf)?;
+                Ok(buf)
+            } else {
+                Err(VaultError::IOError(err))
+            }
+        }
+    }
 }
 
 pub fn write(file: Inode, offset: i64, data: &[u8], fd_map: &FdMap) -> VaultResult<u32> {
-    // let fd_lck = fd_map.get(file, true)?;
-    // let mut fd = fd_lck.lock().unwrap();
-    let path = fd_map.compose_path(file, false);
-    let mut fd = OpenOptions::new().write(true).open(&path)?;
+    let fd_lck = fd_map.get(file, true)?;
+    let mut fd = fd_lck.lock().unwrap();
+
     if offset >= 0 {
         fd.seek(SeekFrom::Start(offset as u64))?;
     } else {
