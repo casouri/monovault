@@ -12,28 +12,26 @@ use crate::types::{
     OpenMode, Vault, VaultError, VaultFileType, VaultRef, VaultResult, GRPC_DATA_CHUNK_SIZE,
 };
 use async_trait::async_trait;
-use log::info;
+use log::{debug, info};
 use tokio::net::TcpListener;
 use tokio::runtime::Builder;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-pub fn run_server(
-    address: &str,
-    local_name: &str,
-    vault_map: HashMap<String, VaultRef>,
-) -> VaultResult<()> {
+pub fn run_server(address: &str, local_name: &str, vault_map: HashMap<String, VaultRef>) {
     let rt = Builder::new_multi_thread().enable_all().build().unwrap();
-    let service = vault_rpc_server::VaultRpcServer::new(VaultServer::new(local_name, vault_map)?);
+    let service = vault_rpc_server::VaultRpcServer::new(
+        VaultServer::new(local_name, vault_map).expect("Cannot create server instance"),
+    );
     let server = tonic::transport::Server::builder().add_service(service.clone());
     let incoming = match rt.block_on(TcpListener::bind(address)) {
         Ok(lis) => tokio_stream::wrappers::TcpListenerStream::new(lis),
-        Err(err) => return Err(err.into()),
+        Err(err) => panic!("Cannot listen to address: {:?}", err),
     };
     info!("Server started");
-    rt.block_on(server.serve_with_incoming(incoming))?;
-    Ok(())
+    rt.block_on(server.serve_with_incoming(incoming))
+        .expect("Error serving requests");
 }
 
 pub struct VaultServer {
@@ -41,6 +39,7 @@ pub struct VaultServer {
     local_name: String,
 }
 
+/// Translate VaultFileType to rpc message field.
 fn kind2num(v: VaultFileType) -> i32 {
     let k = match v {
         VaultFileType::File => 1,
@@ -49,11 +48,22 @@ fn kind2num(v: VaultFileType) -> i32 {
     return k;
 }
 
+/// Translate rpc message field to VaultFileType.
 fn num2kind(k: i32) -> VaultFileType {
     if k == 1 {
         return VaultFileType::File;
     } else {
         return VaultFileType::Directory;
+    }
+}
+
+/// Translate some of the errors to status code and others to a
+/// catch-all status.
+fn translate_result<T>(res: VaultResult<T>) -> Result<T, Status> {
+    match res {
+        Ok(val) => Ok(val),
+        // FIXME: perserve error.
+        Err(err) => Err(Status::unknown(format!("{:?}", err))),
     }
 }
 
@@ -79,19 +89,16 @@ impl VaultRpc for VaultServer {
     async fn attr(&self, request: Request<Inode>) -> Result<Response<FileInfo>, Status> {
         let inner = request.into_inner();
         info!("attr({})", inner.value);
-        let res = self.local().lock().unwrap().attr(inner.value);
-        match res {
-            Ok(v) => Ok(Response::new(FileInfo {
-                inode: v.inode,
-                name: v.name,
-                kind: kind2num(v.kind),
-                size: v.size,
-                atime: v.atime,
-                mtime: v.mtime,
-                version: v.version,
-            })),
-            Err(_) => Err(Status::unknown("Function attr in VaultServer failed!")),
-        }
+        let res = translate_result(self.local().lock().unwrap().attr(inner.value))?;
+        Ok(Response::new(FileInfo {
+            inode: res.inode,
+            name: res.name,
+            kind: kind2num(res.kind),
+            size: res.size,
+            atime: res.atime,
+            mtime: res.mtime,
+            version: res.version,
+        }))
     }
     type readStream = ReceiverStream<Result<DataChunk, Status>>;
     async fn read(
@@ -104,37 +111,35 @@ impl VaultRpc for VaultServer {
             request_inner.file, request_inner.offset, request_inner.size
         );
         // Don't lock the vault when transferring data on wire.
-        let res = {
+        let data = {
             let mut vault = self.local().lock().unwrap();
-            vault.read(request_inner.file, request_inner.offset, request_inner.size)
+            translate_result(vault.read(
+                request_inner.file,
+                request_inner.offset,
+                request_inner.size,
+            ))?
         };
-        match res {
-            Ok(data) => {
-                // Send data by chunks.
-                let (tx, rx) = mpsc::channel(1);
-                tokio::spawn(async move {
-                    let mut offset = request_inner.offset as usize;
-                    let blk_size = GRPC_DATA_CHUNK_SIZE;
-                    while offset < data.len() {
-                        let end = std::cmp::min(offset + blk_size, data.len());
-                        let reply = DataChunk {
-                            payload: data[offset..end].to_vec(),
-                        };
-                        tx.send(Ok(reply)).await.unwrap();
-                        offset = end;
-                    }
-                });
-                Ok(Response::new(ReceiverStream::new(rx)))
+        debug!("data: {:?}", data);
+        let (tx, rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            let mut offset = request_inner.offset as usize;
+            let blk_size = GRPC_DATA_CHUNK_SIZE;
+            while offset < data.len() {
+                let end = std::cmp::min(offset + blk_size, data.len());
+                let reply = DataChunk {
+                    payload: data[offset..end].to_vec(),
+                };
+                tx.send(Ok(reply)).await.unwrap();
+                offset = end;
             }
-            Err(_) => Err(Status::unknown("")),
-        }
+        });
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
     async fn write(
         &self,
         request: Request<Streaming<FileToWrite>>,
     ) -> Result<Response<Size>, Status> {
         let mut stream = request.into_inner();
-        let mut size = 0;
         let mut counter = 0;
         let mut data: Vec<u8> = vec![];
         let mut inode = 0;
@@ -155,10 +160,7 @@ impl VaultRpc for VaultServer {
         // FIXME: write to tmp file by chunk so we don't eat memory.
         // This way we don't lock the vault when transferring packets on wire.
         let mut vault = self.local().lock().unwrap();
-        match vault.write(inode, offset, &data) {
-            Ok(v) => size += v,
-            Err(_) => return Err(Status::unknown("Function write in VaultServer failed!")),
-        }
+        let size = translate_result(vault.write(inode, offset, &data))?;
         Ok(Response::new(Size { value: size }))
     }
 
@@ -171,15 +173,12 @@ impl VaultRpc for VaultServer {
             num2kind(request_inner.kind),
         );
         let mut vault = self.local().lock().unwrap();
-        let res = vault.create(
+        let inode = translate_result(vault.create(
             request_inner.parent,
             request_inner.name.as_str(),
             num2kind(request_inner.kind),
-        );
-        match res {
-            Ok(v) => Ok(Response::new(Inode { value: v })),
-            Err(_) => Err(Status::unknown("Function create in VaultServer failed!")),
-        }
+        ))?;
+        Ok(Response::new(Inode { value: inode }))
     }
     async fn open(&self, request: Request<FileToOpen>) -> Result<Response<Empty>, Status> {
         let request_inner = request.into_inner();
@@ -189,49 +188,42 @@ impl VaultRpc for VaultServer {
         };
         info!("open(file={}, mode={:?})", request_inner.file, mode);
         let mut vault = self.local().lock().unwrap();
-        match vault.open(request_inner.file, mode) {
-            Ok(v) => Ok(Response::new(Empty {})),
-            Err(_) => Err(Status::unknown("Function open in VaultServer failed!")),
-        }
+        translate_result(vault.open(request_inner.file, mode))?;
+        Ok(Response::new(Empty {}))
     }
     async fn close(&self, request: Request<Inode>) -> Result<Response<Empty>, Status> {
         let inner = request.into_inner();
         info!("close({})", inner.value);
         let mut vault = self.local().lock().unwrap();
-        match vault.close(inner.value) {
-            Ok(_) => Ok(Response::new(Empty {})),
-            Err(_) => Err(Status::unknown("Function close in VaultServer failed!")),
-        }
+        translate_result(vault.close(inner.value))?;
+        Ok(Response::new(Empty {}))
     }
     async fn delete(&self, request: Request<Inode>) -> Result<Response<Empty>, Status> {
         let inner = request.into_inner();
         info!("delete({})", inner.value);
         let mut vault = self.local().lock().unwrap();
-        match vault.delete(inner.value) {
-            Ok(_) => Ok(Response::new(Empty {})),
-            Err(_) => Err(Status::unknown("Function delete in VaultServer failed!")),
-        }
+        translate_result(vault.delete(inner.value))?;
+        Ok(Response::new(Empty {}))
     }
     async fn readdir(&self, request: Request<Inode>) -> Result<Response<DirEntryList>, Status> {
         let inner = request.into_inner();
         info!("readdir({})", inner.value);
         let mut vault = self.local().lock().unwrap();
-        match vault.readdir(inner.value) {
-            Ok(v) => Ok(Response::new(DirEntryList {
-                list: v
-                    .into_iter()
-                    .map(|e| FileInfo {
-                        inode: e.inode,
-                        name: e.name,
-                        kind: kind2num(e.kind),
-                        size: e.size,
-                        atime: e.atime,
-                        mtime: e.mtime,
-                        version: e.version,
-                    })
-                    .collect(),
-            })),
-            Err(_) => Err(Status::unknown("Function delete in VaultServer failed!")),
-        }
+        let entries = translate_result(vault.readdir(inner.value))?;
+
+        Ok(Response::new(DirEntryList {
+            list: entries
+                .into_iter()
+                .map(|e| FileInfo {
+                    inode: e.inode,
+                    name: e.name,
+                    kind: kind2num(e.kind),
+                    size: e.size,
+                    atime: e.atime,
+                    mtime: e.mtime,
+                    version: e.version,
+                })
+                .collect(),
+        }))
     }
 }

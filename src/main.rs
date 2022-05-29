@@ -47,14 +47,14 @@ fn main() {
 
     // Create local vault.
     let mut vaults: Vec<VaultRef> = vec![];
-    let local_vault = LocalVault::new(&config.local_vault_name, &db_path)
-        .expect("Cannot create local vault instance");
-    let local_vault_arc = Arc::new(Mutex::new(GenericVault::Local(local_vault)));
-
-    vaults.push(Arc::clone(&local_vault_arc));
+    let local_vault = Arc::new(Mutex::new(GenericVault::Local(
+        LocalVault::new(&config.local_vault_name, &db_path)
+            .expect("Cannot create local vault instance"),
+    )));
+    vaults.push(Arc::clone(&local_vault));
 
     // Create remote vaults.
-    let mut remote_vaults: Vec<VaultRef> = config
+    let remote_vaults: Vec<VaultRef> = config
         .peers
         .iter()
         .map(|(name, address)| {
@@ -64,15 +64,24 @@ fn main() {
         })
         .collect();
 
-    // Create a remote map.
+    // Create a remote map, used by caching remotes and vault server.
     let mut remote_map = HashMap::new();
     for vault in remote_vaults.iter() {
         let vault_name = vault.lock().unwrap().name();
         remote_map.insert(vault_name, Arc::clone(vault));
     }
 
+    // Run vault server. TODO: Add restart?
+    if config.share_local_vault {
+        let mut vault_map = remote_map.clone();
+        vault_map.insert(config.local_vault_name.clone(), Arc::clone(&local_vault));
+        let addr = config.my_address.clone();
+        let _ = thread::spawn(move || run_server(&addr, &config.local_vault_name, vault_map));
+    }
+
+    // Generate the vaults for FUSE.
     let store_path = Path::new(&config.db_path);
-    let vaults_for_fs = if config.caching {
+    let mut vaults_for_fs = if config.caching {
         remote_vaults
             .iter()
             .map(|remote| {
@@ -89,17 +98,9 @@ fn main() {
             })
             .collect()
     } else {
-        remote_vaults.clone()
+        remote_vaults
     };
-
-    // Run vault server.
-    // TODO: Add restart?
-    if config.share_local_vault {
-        remote_vaults.push(local_vault_arc);
-        let addr = config.my_address.clone();
-        let _server_handle =
-            thread::spawn(move || run_server(&addr, &config.local_vault_name, remote_map.clone()));
-    }
+    vaults_for_fs.push(local_vault);
 
     // Configure and start FS.
     let mount_point_name = Path::new(&config.mount_point)
@@ -115,6 +116,7 @@ fn main() {
         MountOption::AllowRoot,
         // Disable special character and block devices
         MountOption::NoDev,
+        MountOption::RW,
         // Prevents Apple from generating ._ files.
         MountOption::CUSTOM("noapplexattr".to_string()),
         MountOption::CUSTOM("noappledouble".to_string()),

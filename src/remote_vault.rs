@@ -1,4 +1,6 @@
-/// Basically a gRPC client that makes requests to remote vault servers.
+/// Basically a gRPC client that makes requests to remote vault
+/// servers. This does not mask network error into FileNotFind errors:
+/// caching remote uses this as a backend.
 use crate::rpc;
 use crate::rpc::vault_rpc_client::VaultRpcClient;
 use crate::rpc::FileToWrite;
@@ -7,7 +9,7 @@ use log::{debug, info};
 use tokio::runtime::{Builder, Runtime};
 use tokio_stream::StreamExt;
 use tonic::transport::Channel;
-use tonic::Request;
+use tonic::{Request, Status};
 
 #[derive(Debug)]
 pub struct RemoteVault {
@@ -101,34 +103,33 @@ impl Iterator for WriteIterator {
     }
 }
 
+fn translate_result<T>(res: Result<T, Status>) -> VaultResult<T> {
+    match res {
+        Ok(val) => Ok(val),
+        Err(status) => Err(VaultError::RemoteError(format!("{:?}", status))),
+    }
+}
+
 impl Vault for RemoteVault {
     fn name(&self) -> String {
         return self.name.clone();
     }
 
     fn attr(&mut self, file: Inode) -> VaultResult<FileInfo> {
-        info!("attr({})", file);
+        debug!("attr({})", file);
         self.get_client()?;
         let client = self.client.as_mut().unwrap();
-        let response = self.rt.block_on(client.attr(rpc::Inode { value: file }));
-        match response {
-            Ok(value) => {
-                let v = value.into_inner();
-                Ok(FileInfo {
-                    inode: v.inode,
-                    name: v.name.to_string(),
-                    kind: num2kind(v.kind),
-                    size: v.size,
-                    atime: v.atime,
-                    mtime: v.mtime,
-                    version: v.version,
-                })
-            }
-            Err(_) => {
-                // TODO: Status Code
-                Err(VaultError::FileNotExist(file))
-            }
-        }
+        let value = translate_result(self.rt.block_on(client.attr(rpc::Inode { value: file })))?;
+        let v = value.into_inner();
+        Ok(FileInfo {
+            inode: v.inode,
+            name: v.name.to_string(),
+            kind: num2kind(v.kind),
+            size: v.size,
+            atime: v.atime,
+            mtime: v.mtime,
+            version: v.version,
+        })
     }
 
     fn read(&mut self, file: Inode, offset: i64, size: u32) -> VaultResult<Vec<u8>> {
@@ -136,31 +137,17 @@ impl Vault for RemoteVault {
         let mut result: Vec<u8> = Vec::new();
         self.get_client()?;
         let client = self.client.as_mut().unwrap();
-        let response = self
-            .rt
-            .block_on(client.read(rpc::FileToRead { file, offset, size }));
-        match response {
-            Ok(value) => {
-                let mut stream = value.into_inner();
-                while let Some(received) = self.rt.block_on(stream.next()) {
-                    match received {
-                        Ok(value) => {
-                            result.extend(&value.payload);
-                        }
-                        Err(_) => {
-                            // TODO: which one to return?
-                            // return Err(VaultError::FileNotExist(file)); // TODO: status code
-                            return Ok(result);
-                        }
-                    }
-                }
-                return Ok(result);
-            }
-            Err(_) => {
-                // TODO: status code
-                Err(VaultError::FileNotExist(file))
-            }
+        let value = translate_result(self.rt.block_on(client.read(rpc::FileToRead {
+            file,
+            offset,
+            size,
+        })))?;
+        let mut stream = value.into_inner();
+        while let Some(received) = self.rt.block_on(stream.next()) {
+            let value = translate_result(received)?;
+            result.extend(&value.payload);
         }
+        return Ok(result);
     }
 
     fn write(&mut self, file: Inode, offset: i64, data: &[u8]) -> VaultResult<u32> {
@@ -178,7 +165,7 @@ impl Vault for RemoteVault {
             offset as usize,
             GRPC_DATA_CHUNK_SIZE,
         )));
-        let response = self.rt.block_on(client.write(request)).unwrap();
+        let response = translate_result(self.rt.block_on(client.write(request)))?;
         Ok(response.into_inner().value)
     }
 
@@ -191,11 +178,7 @@ impl Vault for RemoteVault {
             name: name.to_string(),
             kind: kind2num(kind),
         };
-        let response = self
-            .rt
-            .block_on(client.create(request))
-            .unwrap()
-            .into_inner();
+        let response = translate_result(self.rt.block_on(client.create(request)))?.into_inner();
         return Ok(response.value);
     }
 
@@ -210,7 +193,7 @@ impl Vault for RemoteVault {
         if matches!(mode, OpenMode::R) {
             request.mode = 0;
         }
-        let _ = self.rt.block_on(client.open(request)).unwrap().into_inner();
+        translate_result(self.rt.block_on(client.open(request)))?;
         return Ok(());
     }
 
@@ -218,11 +201,8 @@ impl Vault for RemoteVault {
         info!("close({})", file);
         self.get_client()?;
         let client = self.client.as_mut().unwrap();
-        let _ = self
-            .rt
-            .block_on(client.close(rpc::Inode { value: file }))
-            .unwrap()
-            .into_inner();
+        translate_result(self.rt.block_on(client.close(rpc::Inode { value: file })))?;
+
         return Ok(());
     }
 
@@ -230,24 +210,18 @@ impl Vault for RemoteVault {
         info!("delete({})", file);
         self.get_client()?;
         let client = self.client.as_mut().unwrap();
-        let _ = self
-            .rt
-            .block_on(client.delete(rpc::Inode { value: file }))
-            .unwrap()
-            .into_inner();
+        translate_result(self.rt.block_on(client.delete(rpc::Inode { value: file })))?;
         return Ok(());
     }
 
     fn readdir(&mut self, dir: Inode) -> VaultResult<Vec<FileInfo>> {
-        info!("readdir({})", dir);
+        debug!("readdir({})", dir);
         self.get_client()?;
         let client = self.client.as_mut().unwrap();
-        let response = self
-            .rt
-            .block_on(client.readdir(rpc::Inode { value: dir }))
-            .unwrap()
-            .into_inner()
-            .list;
+        let response =
+            translate_result(self.rt.block_on(client.readdir(rpc::Inode { value: dir })))?
+                .into_inner()
+                .list;
         let result: Vec<FileInfo> = response
             .iter()
             .map(|info| FileInfo {

@@ -4,7 +4,7 @@ use crate::types::*;
 use log::{debug, info};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicU64, Ordering::SeqCst},
@@ -18,6 +18,44 @@ use std::time;
 #[derive(Debug)]
 pub struct RefCounter {
     ref_count: Mutex<HashMap<Inode, u64>>,
+}
+
+#[derive(Debug)]
+pub struct FdMap {
+    /// Name of this vault.
+    name: String,
+    /// Directory in which we store data files.
+    data_file_dir: PathBuf,
+    /// Maps inode to file handlers. DO NOT store references of fd's
+    /// in other places, when the fd is removed from this map, we
+    /// expect it to be dropped and the file closed.
+    read_map: Mutex<HashMap<Inode, Arc<Mutex<File>>>>,
+    write_map: Mutex<HashMap<Inode, Arc<Mutex<File>>>>,
+    len_map: Mutex<HashMap<Inode, u64>>,
+}
+
+/// Local vault delegates metadata work to the database, and mainly
+/// works on locating the "data file" for each file, and reading and
+/// writing data files.
+#[derive(Debug)]
+pub struct LocalVault {
+    /// Name of this vault.
+    name: String,
+    /// Directory in which we store data files.
+    data_file_dir: PathBuf,
+    /// Database for metadata.
+    database: Database,
+    fd_map: FdMap,
+    /// Counts the number of references to each file, when ref count
+    /// of that file reaches 0, the file handler can be closed, and
+    /// the file can be deleted from disk (if requested).
+    ref_count: RefCounter,
+    /// Records whether an opened file is modified (written).
+    mod_track: RefCounter,
+    /// The next allocated inode is current_inode + 1.
+    current_inode: AtomicU64,
+    /// Files waiting to be deleted.
+    pending_delete: Vec<Inode>,
 }
 
 impl RefCounter {
@@ -74,36 +112,261 @@ impl RefCounter {
     }
 
     /// Set `file`'s count to 0.
-    pub fn set_to_zero(&self, file: Inode) {
+    pub fn zero(&self, file: Inode) {
         self.ref_count.lock().unwrap().remove(&file);
     }
 }
 
-/// Local vault delegates metadata work to the database, and mainly
-/// works on locating the "data file" for each file, and reading and
-/// writing data files.
-#[derive(Debug)]
-pub struct LocalVault {
-    /// Name of this vault.
-    name: String,
-    /// Directory in which we store data files.
-    data_file_dir: PathBuf,
-    /// Database for metadata.
-    database: Database,
-    /// Maps inode to file handlers. DO NOT store references of fd's
-    /// in other places, when the fd is removed from this map, we
-    /// expect it to be dropped and the file closed.
-    fd_map: HashMap<Inode, Arc<Mutex<File>>>,
-    /// Counts the number of references to each file, when ref count
-    /// of that file reaches 0, the file handler can be closed, and
-    /// the file can be deleted from disk (if requested).
-    ref_count: RefCounter,
-    /// Records whether an opened file is modified (written).
-    mod_track: RefCounter,
-    /// The next allocated inode is current_inode + 1.
-    current_inode: AtomicU64,
-    /// Files waiting to be deleted.
-    pending_delete: Vec<Inode>,
+impl FdMap {
+    pub fn new(vault_name: &str, data_file_dir: &Path) -> FdMap {
+        FdMap {
+            name: vault_name.to_string(),
+            data_file_dir: data_file_dir.to_path_buf(),
+            read_map: Mutex::new(HashMap::new()),
+            write_map: Mutex::new(HashMap::new()),
+            len_map: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Get the path to where the content of `file` is stored.
+    /// Basically `db_path/vault_name-inode`.
+    pub fn compose_path(&self, file: Inode, write: bool) -> PathBuf {
+        self.data_file_dir.join(format!(
+            "{}-{}{}",
+            self.name,
+            file.to_string(),
+            if write { "-write" } else { "" }
+        ))
+    }
+
+    /// Open and get the file handler for `file`. `file` is created if
+    /// not already exists. When this function returns successfully,
+    /// the data file must exist on disk (and `check_data_file_exists`
+    /// returns true).
+    pub fn get(&self, file: Inode, write: bool) -> VaultResult<Arc<Mutex<File>>> {
+        // let mut map = if write {
+        //     self.write_map.lock().unwrap()
+        // } else {
+        //     self.read_map.lock().unwrap()
+        // };
+        // match map.get(&file) {
+        //     Some(fd) => Ok(Arc::clone(fd)),
+        //     None => {
+        //         let path = self.compose_path(file, write);
+        //         info!("get_file, path={:?}", &path);
+        //         // If create is true, either write or append must be
+        //         // true.
+        //         let mut fd = if write {
+        //             OpenOptions::new()
+        //                 .create(true)
+        //                 .write(true)
+        //                 .truncate(true)
+        //                 .open(&path)?
+        //         } else {
+        //             OpenOptions::new()
+        //                 .read(true)
+        //                 .create(true)
+        //                 .write(true)
+        //                 .open(&path)?
+        //         };
+        //         // Make sure file is created.
+        //         fd.flush()?;
+        //         debug!("file content: {}", std::fs::read_to_string(&path)?);
+        //         let fd_ref = Arc::new(Mutex::new(fd));
+        //         map.insert(file, Arc::clone(&fd_ref));
+        //         Ok(fd_ref)
+        //     }
+        // }
+        let path = self.compose_path(file, write);
+        info!("get_file, path={:?}", &path);
+        // If create is true, either write or append must be
+        // true.
+        let mut fd = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(write)
+            .open(&path)?;
+        // Make sure file is created.
+        fd.flush()?;
+        Ok(Arc::new(Mutex::new(fd)))
+    }
+
+    pub fn take_over(&self, file: Inode) {
+        let write_map = self.write_map.lock().unwrap();
+        let write_fd = Arc::clone(&write_map.get(&file).unwrap());
+        drop(write_map);
+        self.read_map.lock().unwrap().insert(file, write_fd);
+    }
+
+    /// Set `file`'s length to `len` if `len` is greater than the
+    /// current len.
+    // pub fn grow_len(&self, file: Inode, len: u64) {
+    //     let current = self.get_len(file);
+    //     if current < len {
+    //         self.len_map.lock().unwrap().insert(file, len);
+    //     }
+    // }
+
+    /// Return `file`'s len.
+    // pub fn get_len(&self, file: Inode) -> u64 {
+    //     match self.len_map.lock().unwrap().get(&file) {
+    //         Some(&len) => len,
+    //         None => 0,
+    //     }
+    // }
+
+    /// Drop `file` (and thus saving it to disk).
+    pub fn close(&self, file: Inode, modified: bool) -> VaultResult<()> {
+        // let mut read_fd = self.get(file, false)?;
+        // let mut read_buf = String::new();
+        // // read_fd.lock().unwrap().read_to_string(&mut read_buf)?;
+        // read_fd.lock().unwrap().flush()?;
+
+        // let mut write_fd = self.get(file, true)?;
+        // let mut write_buf = String::new();
+        // // write_fd.lock().unwrap().read_to_string(&mut write_buf)?;
+        // write_fd.lock().unwrap().flush()?;
+
+        // debug!("Before close, read copy: {}", read_buf);
+        // debug!("Before close, write copy: {}", write_buf);
+
+        self.read_map.lock().unwrap().remove(&file);
+        self.write_map.lock().unwrap().remove(&file);
+
+        if modified {
+            std::fs::copy(
+                self.compose_path(file, true),
+                self.compose_path(file, false),
+            )?;
+            debug!(
+                "Modified, read copy({:?}): {}",
+                &self.compose_path(file, false),
+                std::fs::read_to_string(self.compose_path(file, false))?
+            );
+            debug!(
+                "Modified, write copy({:?}): {}",
+                &self.compose_path(file, true),
+                std::fs::read_to_string(self.compose_path(file, true))?
+            );
+            // If not modified, write is never called, a write copy is
+            // never created, and we don't need to delete it.
+            // std::fs::remove_file(self.compose_path(file, true))?;
+
+            // let len = self.get_len(file);
+            // self.len_map.lock().unwrap().insert(file, 0);
+            // debug!("modified, len={}", len);
+
+            // // fd.set_len(len)?;
+            // let tmp_path = std::env::temp_dir().join(file.to_string());
+            // let mut tmp = File::create(&tmp_path)?;
+
+            // let mut buf = vec![0; len as usize];
+            // fd.seek(SeekFrom::Start(0))?;
+            // fd.read_exact(&mut buf)?;
+            // tmp.write_all(&buf)?;
+
+            // drop(tmp);
+            // self.fd_map.lock().unwrap().remove(&file);
+            // drop(fd);
+
+            // std::fs::copy(&tmp_path, self.compose_path(file))?;
+        } else {
+            // self.fd_map.lock().unwrap().remove(&file);
+        }
+        Ok(())
+    }
+}
+
+/// The attr function used by both LocalVault and CachingRemote.
+pub fn attr(file: Inode, database: &mut Database, fd_map: &FdMap) -> VaultResult<FileInfo> {
+    // It is entirely valid (and possible) for the userspace to
+    // refer to a file that doesn't exist in the database: when a
+    // remote host deletes a file in our local vault, the
+    // userspace on our host still remembers that file. If our
+    // userspace now asks for that file, we can't throw a raw sql
+    // error, we should throw a proper file not find.
+    let mut info = match database.attr(file) {
+        Ok(info) => Ok(info),
+        Err(VaultError::SqliteError(rusqlite::Error::QueryReturnedNoRows)) => {
+            Err(VaultError::FileNotExist(file))
+        }
+        Err(err) => Err(err),
+    }?;
+    let size = match info.kind {
+        VaultFileType::File => {
+            let meta = std::fs::metadata(fd_map.compose_path(file, false))?;
+            meta.len()
+        }
+        VaultFileType::Directory => 1,
+    };
+    info.size = size;
+    Ok(info)
+}
+
+/// The `read` function that is used by LocalVault and CachingRemote.
+pub fn read(file: Inode, offset: i64, size: u32, fd_map: &FdMap) -> VaultResult<Vec<u8>> {
+    let fd_lck = fd_map.get(file, false)?;
+    let mut fd = fd_lck.lock().unwrap();
+    let mut buf = vec![0; size as usize];
+    if offset >= 0 {
+        fd.seek(SeekFrom::Start(offset as u64))?;
+    } else {
+        fd.seek(SeekFrom::End(offset))?;
+    }
+    // Read exactly SIZE bytes, if not enough, read to EOF but don't
+    // error.
+    match fd.read_exact(&mut buf) {
+        Ok(()) => Ok(buf),
+        Err(err) => {
+            if err.kind() == std::io::ErrorKind::UnexpectedEof {
+                fd.read_to_end(&mut buf)?;
+                Ok(buf)
+            } else {
+                Err(VaultError::IOError(err))
+            }
+        }
+    }
+}
+
+pub fn write(file: Inode, offset: i64, data: &[u8], fd_map: &FdMap) -> VaultResult<u32> {
+    let fd_lck = fd_map.get(file, true)?;
+    let mut fd = fd_lck.lock().unwrap();
+    if offset >= 0 {
+        fd.seek(SeekFrom::Start(offset as u64))?;
+    } else {
+        fd.seek(SeekFrom::End(offset))?;
+    }
+    fd.write_all(data)?;
+    // fd_map.take_over(file);
+    Ok(data.len() as u32)
+}
+
+pub fn readdir(dir: Inode, database: &mut Database, fd_map: &FdMap) -> VaultResult<Vec<FileInfo>> {
+    let (this, parent, entries) = database.readdir(dir)?;
+    let mut result = vec![];
+    for file in entries {
+        result.push(attr(file, database, fd_map)?)
+    }
+    let mut current_dir = attr(this, database, fd_map)?;
+    current_dir.name = ".".to_string();
+    result.push(current_dir);
+    if parent != 0 {
+        let mut parrent_dir = attr(parent, database, fd_map)?;
+        parrent_dir.name = "..".to_string();
+        result.push(parrent_dir);
+    }
+    Ok(result)
+}
+
+/// Return true if the file meta exists in the vault.
+pub fn has_file(file: Inode, database: &mut Database) -> VaultResult<bool> {
+    // Invariant: metadata exists => data file exists.
+    match database.attr(file) {
+        Ok(_) => Ok(true),
+        Err(VaultError::SqliteError(rusqlite::Error::QueryReturnedNoRows)) => Ok(false),
+        Err(err) => Err(err),
+    }
 }
 
 impl LocalVault {
@@ -125,9 +388,9 @@ impl LocalVault {
         info!("vault {} next_inode={}", name, current_inode);
         Ok(LocalVault {
             name: name.to_string(),
-            data_file_dir,
             database,
-            fd_map: HashMap::new(),
+            fd_map: FdMap::new(name, &data_file_dir),
+            data_file_dir,
             ref_count: RefCounter::new(),
             mod_track: RefCounter::new(),
             current_inode: AtomicU64::new(current_inode),
@@ -143,37 +406,6 @@ impl LocalVault {
         self.current_inode.load(SeqCst)
     }
 
-    /// Get the path to where the content of `file` is stored.
-    /// Basically `db_path/vault_name-inode`.
-    fn compose_path(&self, file: Inode) -> PathBuf {
-        self.data_file_dir
-            .join(format!("{}-{}", self.name(), file.to_string()))
-    }
-
-    /// Open and get the file handler for `file`. `file` is created if
-    /// not already exists. When this function returns successfuly,
-    /// the data file must exist on disk (and `check_data_file_exists`
-    /// returns true).
-    fn get_file(&mut self, file: Inode) -> VaultResult<Arc<Mutex<File>>> {
-        let ret = self.fd_map.get(&file);
-        match ret {
-            Some(fd) => Ok(Arc::clone(fd)),
-            None => {
-                info!("get_file, path={:?}", self.compose_path(file));
-                let mut fd = OpenOptions::new()
-                    .create(true)
-                    .read(true)
-                    .write(true)
-                    .open(self.compose_path(file))?;
-                // Make sure file exists on disk.
-                fd.flush()?;
-                let fdref = Arc::new(Mutex::new(fd));
-                self.fd_map.insert(file, Arc::clone(&fdref));
-                Ok(fdref)
-            }
-        }
-    }
-
     fn check_is_regular_file(&self, file: Inode) -> VaultResult<()> {
         let kind = self.database.attr(file)?.kind;
         match kind {
@@ -184,7 +416,7 @@ impl LocalVault {
 
     /// Check if the corresponding data file for `file` exists on disk.
     fn check_data_file_exists(&self, file: Inode) -> VaultResult<()> {
-        let path = self.compose_path(file);
+        let path = self.fd_map.compose_path(file, false);
         if path.exists() {
             Ok(())
         } else {
@@ -202,34 +434,16 @@ impl Vault for LocalVault {
         info!("tear_down()");
         let queue = &self.pending_delete;
         for &file in queue.iter() {
-            std::fs::remove_file(self.compose_path(file))?;
+            std::fs::remove_file(self.fd_map.compose_path(file, false))?;
         }
         Ok(())
     }
 
     fn attr(&mut self, file: Inode) -> VaultResult<FileInfo> {
-        info!("attr({})", file);
-        // It is entirely valid (and possible) for the userspace to
-        // refer to a file that doesn't exist in the database: when a
-        // remote host deletes a file in our local vault, the
-        // userspace on our host still remembers that file. If our
-        // userspace now asks for that file, we can't throw a raw sql
-        // error, we should throw a proper file not find.
-        let mut info = match self.database.attr(file) {
-            Ok(info) => Ok(info),
-            Err(VaultError::SqliteError(rusqlite::Error::QueryReturnedNoRows)) => {
-                Err(VaultError::FileNotExist(file))
-            }
-            Err(err) => Err(err),
-        }?;
-        let size = match info.kind {
-            VaultFileType::File => {
-                let meta = std::fs::metadata(self.compose_path(file))?;
-                meta.len()
-            }
-            VaultFileType::Directory => 1,
-        };
-        info.size = size;
+        debug!("attr({})", file);
+
+        let info = attr(file, &mut self.database, &mut self.fd_map)?;
+
         debug!(
             "(inode={}, name={}, size={}, atime={}, mtime={}, kind={:?})",
             info.inode, info.name, info.size, info.atime, info.mtime, info.kind
@@ -246,22 +460,7 @@ impl Vault for LocalVault {
         //
         // self.check_is_regular_file(file)?;
         self.check_data_file_exists(file)?;
-        let lck = self.get_file(file)?;
-        let mut file = lck.lock().unwrap();
-        let mut buf = vec![0; size as usize];
-        file.seek(SeekFrom::Start(offset as u64))?;
-        // Read exact SIZE bytes, if not enough, read to EOF but don't error.
-        match file.read_exact(&mut buf) {
-            Ok(()) => Ok(buf),
-            Err(err) => {
-                if err.kind() == std::io::ErrorKind::UnexpectedEof {
-                    file.read_to_end(&mut buf)?;
-                    Ok(buf)
-                } else {
-                    Err(VaultError::IOError(err))
-                }
-            }
-        }
+        read(file, offset, size, &mut self.fd_map)
     }
 
     fn write(&mut self, file: Inode, offset: i64, data: &[u8]) -> VaultResult<u32> {
@@ -278,9 +477,7 @@ impl Vault for LocalVault {
         //
         // self.check_is_regular_file(file)?;
         self.check_data_file_exists(file)?;
-        let lck = self.get_file(file)?;
-        let mut fd = lck.lock().unwrap();
-        let size = fd.write(data)?;
+        let size = write(file, offset, data, &mut self.fd_map)?;
         self.mod_track.incf(file)?;
         Ok(size as u32)
     }
@@ -295,11 +492,8 @@ impl Vault for LocalVault {
         // In fuse semantics (and thus vault's) create also open the
         // file. We need to call get_file to ensure the data file is
         // created.
-        match kind {
-            VaultFileType::File => {
-                self.get_file(inode)?;
-            }
-            VaultFileType::Directory => (),
+        if let VaultFileType::File = kind {
+            self.fd_map.get(inode, false)?;
         }
         // NOTE: Make sure we create data file before creating
         // metadata, to ensure consistency.
@@ -359,9 +553,8 @@ impl Vault for LocalVault {
             // When the file is dropped it is automatically closed. We
             // never store the file elsewhere and ref_count is 0 so
             // this is when the file is dropped.
-            let map = &mut self.fd_map;
-            map.remove(&file);
-            self.mod_track.set_to_zero(file);
+            self.fd_map.close(file, modified)?;
+            self.mod_track.zero(file);
         }
         Ok(())
     }
@@ -379,7 +572,7 @@ impl Vault for LocalVault {
             VaultFileType::File => {
                 self.check_data_file_exists(file)?;
                 if self.ref_count.count(file) == 0 {
-                    std::fs::remove_file(self.compose_path(file))?;
+                    std::fs::remove_file(self.fd_map.compose_path(file, false))?;
                 } else {
                     // If there are other references to the file,
                     // don't delete yet.
@@ -395,71 +588,60 @@ impl Vault for LocalVault {
     }
 
     fn readdir(&mut self, dir: Inode) -> VaultResult<Vec<FileInfo>> {
-        info!("readdir({})", dir);
-        let (this, parent, entries) = self.database.readdir(dir)?;
-        let mut result = vec![];
-        for file in entries {
-            result.push(self.attr(file)?)
-        }
-        let mut current_dir = self.attr(this)?;
-        current_dir.name = ".".to_string();
-        result.push(current_dir);
-        if parent != 0 {
-            let mut parrent_dir = self.attr(parent)?;
-            parrent_dir.name = "..".to_string();
-            result.push(parrent_dir);
-        }
+        debug!("readdir({})", dir);
+        let result = readdir(dir, &mut self.database, &mut self.fd_map)?;
         debug!("readdir(dir={}) => {:?}", dir, &result);
         Ok(result)
     }
 }
 
-/// Caching functions
+// Caching functions
 
-impl LocalVault {
-    /// Copy `file` to `path`.
-    pub fn cache_copy_file(&self, file: Inode, path: &Path) -> VaultResult<u64> {
-        let from_path = self.compose_path(file);
-        let size = std::fs::copy(&from_path, path)?;
-        Ok(size)
-    }
+// impl LocalVault {
+//     /// Copy `file` to `path`.
+//     pub fn cache_copy_file(&self, file: Inode, path: &Path) -> VaultResult<u64> {
+//         let from_path = self.fd_map.compose_path(file);
+//         let size = std::fs::copy(&from_path, path)?;
+//         Ok(size)
+//     }
 
-    // Create data file and meta data for `child`. Set `version` to 0
-    // so content is fetched on open. This function should only be
-    // called when `child` does not exist.
-    pub fn cache_add_file(
-        &mut self,
-        parent: Inode,
-        child: Inode,
-        name: &str,
-        kind: VaultFileType,
-        atime: u64,
-        mtime: u64,
-        version: u64,
-    ) -> VaultResult<()> {
-        match kind {
-            VaultFileType::File => {
-                self.get_file(child)?;
-            }
-            VaultFileType::Directory => (),
-        }
-        self.database
-            .add_file(parent, child, name, kind, atime, mtime, version)?;
-        self.ref_count.incf(child)?;
-        Ok(())
-    }
+// pub fn cache_set_attr(
+//     &mut self,
+//     file: Inode,
+//     name: Option<&str>,
+//     atime: Option<u64>,
+//     mtime: Option<u64>,
+//     version: Option<u64>,
+// ) -> VaultResult<()> {
+//     self.database.set_attr(file, name, atime, mtime, version)
+// }
 
-    /// Return true if the file exists in the vault.
-    pub fn cache_has_file(&mut self, file: Inode) -> VaultResult<bool> {
-        // Invariant: if meta exists, data file must exist.
-        match self.attr(file) {
-            Ok(_) => Ok(true),
-            Err(VaultError::FileNotExist(_)) => Ok(false),
-            Err(err) => Err(err),
-        }
-    }
+// Create metadata and data file for `child`. Set `version` to 0
+// so content is fetched on open. This function should only be
+// called when `child` does not exist. We have to have data file
+// on disk because `attr` accesses it for size info.
+// pub fn cache_add_file(
+//     &mut self,
+//     parent: Inode,
+//     child: Inode,
+//     name: &str,
+//     kind: VaultFileType,
+//     atime: u64,
+//     mtime: u64,
+//     version: u64,
+// ) -> VaultResult<()> {
+//     match kind {
+//         VaultFileType::File => {
+//             self.fd_map.get(child)?;
+//         }
+//         VaultFileType::Directory => (),
+//     }
+//     self.database
+//         .add_file(parent, child, name, kind, atime, mtime, version)?;
+//     Ok(())
+// }
 
-    pub fn cache_ref_count(&self, file: Inode) -> u64 {
-        self.ref_count.count(file)
-    }
-}
+// pub fn cache_ref_count(&self, file: Inode) -> u64 {
+//     self.ref_count.count(file)
+// }
+// }

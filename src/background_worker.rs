@@ -1,6 +1,6 @@
-use crate::local_vault::LocalVault;
+use crate::local_vault::FdMap;
 use crate::types::*;
-use log::{error, info};
+use log::{debug, error, info};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -11,7 +11,7 @@ use std::time;
 pub type BackgroundLog = Arc<Mutex<Vec<BackgroundOp>>>;
 
 pub struct BackgroundWorker {
-    local: Arc<Mutex<LocalVault>>,
+    fd_map: Arc<FdMap>,
     remote: VaultRef,
     log: BackgroundLog,
     pending_log: Vec<BackgroundOp>,
@@ -20,9 +20,12 @@ pub struct BackgroundWorker {
 
 #[derive(Debug, Clone)]
 pub enum BackgroundOp {
+    /// Delete file.
     Delete(Inode),
+    /// Create file, name, kind.
     Create(Inode, String, VaultFileType),
-    Upload(Inode, String),
+    /// Upload file, name, version.
+    Upload(Inode, String, u64),
 }
 
 impl BackgroundWorker {
@@ -32,13 +35,13 @@ impl BackgroundWorker {
     /// This way background operation (like uploading large files)
     /// don't block FUSE operations.
     pub fn new(
-        local: Arc<Mutex<LocalVault>>,
+        fd_map: Arc<FdMap>,
         remote: VaultRef,
         log: BackgroundLog,
         graveyard: &Path,
     ) -> BackgroundWorker {
         BackgroundWorker {
-            local,
+            fd_map,
             remote,
             log,
             pending_log: vec![],
@@ -76,7 +79,9 @@ impl BackgroundWorker {
                     BackgroundOp::Create(parent, ref name, kind) => {
                         self.handle_create(parent, name, kind)
                     }
-                    BackgroundOp::Upload(file, ref name) => self.handle_upload(file, name),
+                    BackgroundOp::Upload(file, ref name, version) => {
+                        self.handle_upload(file, name, version)
+                    }
                 };
                 // If operation success or fail, move to next, if
                 // connection broke, wait for a while and try again.
@@ -123,19 +128,26 @@ impl BackgroundWorker {
         Ok(())
     }
 
-    fn handle_upload(&mut self, file: Inode, name: &str) -> VaultResult<()> {
+    fn handle_upload(&mut self, file: Inode, name: &str, version: u64) -> VaultResult<()> {
         let vault_name = self.remote.lock().unwrap().name();
+        info!("handle_upload({}) to {}", file, &vault_name);
         let graveyard_file_path = self.graveyard.join(format!(
             "vault({})name({})inode({})",
             vault_name, name, file
         ));
-        self.local
-            .lock()
-            .unwrap()
-            .cache_copy_file(file, &graveyard_file_path)?;
+        // At this point the read copy has the latest content, because
+        // when closing the file we copied the write copy to the read
+        // copy. (See `FdMap::close`.)
+        let from_path = self.fd_map.compose_path(file, false);
+        std::fs::copy(&from_path, &graveyard_file_path)?;
+        debug!("copy to {}", graveyard_file_path.to_string_lossy());
         // FIXME: read by chunk.
         let mut buf = vec![];
-        let mut fd = File::open(graveyard_file_path)?;
+        let mut fd = File::open(&graveyard_file_path)?;
+        debug!(
+            "file size: {}",
+            std::fs::metadata(&graveyard_file_path)?.len()
+        );
         fd.read_to_end(&mut buf)?;
         self.remote.lock().unwrap().write(file, 0, &buf)?;
         Ok(())
