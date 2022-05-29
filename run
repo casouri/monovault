@@ -7,25 +7,46 @@ MOUNT2="mount2"
 VAULT1="yuan"
 VAULT2="alice"
 
-if [ $1 == "reset" ]
+CMD=$1
+
+if [ "$CMD" == "reset" ]
 then
-    rm -r "${DB1}/*"
-    rm -r "${DB2}/*"
+    rm -r "${DB1}/"*
+    rm -r "${DB2}/"*
 fi
 
-if [ $1 == "umount" ]
+if [ "$CMD" == "um" ]
 then
     umount -f "${MOUNT1}"
     umount -f "${MOUNT2}"
 fi
 
-if [ $1 == "pop" ]
+if [ "$CMD" == "pop" ]
 then
     mkdir "${MOUNT1}/${VAULT1}/d1"
     echo 'woome' >"${MOUNT1}/${VAULT1}/f1"
     echo 'veemo' >"${MOUNT1}/${VAULT1}/d1/f1"
 
-    mkdir "${MOUNT1}/${VAULT2}/d1"
-    echo 'woome' >"${MOUNT1}/${VAULT2}/f1"
-    echo 'veemo' >"${MOUNT1}/${VAULT2}/d1/f1"
+    mkdir "${MOUNT2}/${VAULT2}/d1"
+    echo 'woome' >"${MOUNT2}/${VAULT2}/f1"
+    echo 'veemo' >"${MOUNT2}/${VAULT2}/d1/f1"
+    CMD="show"
+fi
+
+if [ "$CMD" == "clear" ]
+then
+    rm "${DB1}/data/${VAULT2}-"*
+    rm "${DB1}/db/${VAULT2}.sqlite3"
+    rm "${DB1}/graveyard/"*
+    rm "${DB2}/data/${VAULT1}-"*
+    rm "${DB2}/db/${VAULT1}.sqlite3"
+    rm "${DB2}/graveyard/"*
+
+fi
+
+if [ "$CMD" == "show" ]
+then
+    tree "${MOUNT1}"
+    echo
+    tree "${MOUNT2}"
 fi
