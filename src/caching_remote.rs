@@ -205,7 +205,6 @@ impl Vault for CachingVault {
                 debug!("pulling from remote");
                 let version = remote_meta.version;
                 let data = remote.read(file, 0, remote_meta.size as u32)?;
-                debug!("data: {:?}", data);
                 local_vault::write(file, 0, &data, fd_map)?;
                 fd_map.close(file, true)?;
                 database.set_attr(file, None, None, None, Some(version))?;

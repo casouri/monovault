@@ -619,7 +619,6 @@ impl Filesystem for FS {
             offset,
             data.len()
         );
-        error!("write: {}", std::str::from_utf8(data).unwrap());
         match self.write_1(_req, ino, fh, offset, data, write_flags, flags, lock_owner) {
             Ok(size) => reply.written(size),
             Err(err) => {
