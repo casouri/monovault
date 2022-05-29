@@ -144,52 +144,32 @@ impl FdMap {
     /// the data file must exist on disk (and `check_data_file_exists`
     /// returns true).
     pub fn get(&self, file: Inode, write: bool) -> VaultResult<Arc<Mutex<File>>> {
-        // let mut map = if write {
-        //     self.write_map.lock().unwrap()
-        // } else {
-        //     self.read_map.lock().unwrap()
-        // };
-        // match map.get(&file) {
-        //     Some(fd) => Ok(Arc::clone(fd)),
-        //     None => {
-        //         let path = self.compose_path(file, write);
-        //         info!("get_file, path={:?}", &path);
-        //         // If create is true, either write or append must be
-        //         // true.
-        //         let mut fd = if write {
-        //             OpenOptions::new()
-        //                 .create(true)
-        //                 .write(true)
-        //                 .truncate(true)
-        //                 .open(&path)?
-        //         } else {
-        //             OpenOptions::new()
-        //                 .read(true)
-        //                 .create(true)
-        //                 .write(true)
-        //                 .open(&path)?
-        //         };
-        //         // Make sure file is created.
-        //         fd.flush()?;
-        //         debug!("file content: {}", std::fs::read_to_string(&path)?);
-        //         let fd_ref = Arc::new(Mutex::new(fd));
-        //         map.insert(file, Arc::clone(&fd_ref));
-        //         Ok(fd_ref)
-        //     }
-        // }
-        let path = self.compose_path(file, write);
-        info!("get_file, path={:?}", &path);
-        // If create is true, either write or append must be
-        // true.
-        let mut fd = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(write)
-            .open(&path)?;
-        // Make sure file is created.
-        fd.flush()?;
-        Ok(Arc::new(Mutex::new(fd)))
+        let mut map = if write {
+            self.write_map.lock().unwrap()
+        } else {
+            self.read_map.lock().unwrap()
+        };
+        match map.get(&file) {
+            Some(fd) => Ok(Arc::clone(fd)),
+            None => {
+                let path = self.compose_path(file, write);
+                info!("get_file, path={:?}", &path);
+                // If create is true, either write or append must be
+                // true.
+                let mut fd = OpenOptions::new()
+                    .create(true)
+                    .read(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(&path)?;
+                // Make sure file is created.
+                fd.flush()?;
+                debug!("file content: {}", std::fs::read_to_string(&path)?);
+                let fd_ref = Arc::new(Mutex::new(fd));
+                map.insert(file, Arc::clone(&fd_ref));
+                Ok(fd_ref)
+            }
+        }
     }
 
     pub fn take_over(&self, file: Inode) {
@@ -231,24 +211,24 @@ impl FdMap {
         // debug!("Before close, read copy: {}", read_buf);
         // debug!("Before close, write copy: {}", write_buf);
 
-        self.read_map.lock().unwrap().remove(&file);
-        self.write_map.lock().unwrap().remove(&file);
+        // self.read_map.lock().unwrap().remove(&file);
+        // self.write_map.lock().unwrap().remove(&file);
 
         if modified {
-            std::fs::copy(
-                self.compose_path(file, true),
-                self.compose_path(file, false),
-            )?;
-            debug!(
-                "Modified, read copy({:?}): {}",
-                &self.compose_path(file, false),
-                std::fs::read_to_string(self.compose_path(file, false))?
-            );
-            debug!(
-                "Modified, write copy({:?}): {}",
-                &self.compose_path(file, true),
-                std::fs::read_to_string(self.compose_path(file, true))?
-            );
+            // debug!(
+            //     "Modified, read copy({:?}): {}",
+            //     &self.compose_path(file, false),
+            //     std::fs::read_to_string(self.compose_path(file, false))?
+            // );
+            // debug!(
+            //     "Modified, write copy({:?}): {}",
+            //     &self.compose_path(file, true),
+            //     std::fs::read_to_string(self.compose_path(file, true))?
+            // );
+            // std::fs::copy(
+            //     self.compose_path(file, true),
+            //     self.compose_path(file, false),
+            // )?;
             // If not modified, write is never called, a write copy is
             // never created, and we don't need to delete it.
             // std::fs::remove_file(self.compose_path(file, true))?;
@@ -306,32 +286,42 @@ pub fn attr(file: Inode, database: &mut Database, fd_map: &FdMap) -> VaultResult
 
 /// The `read` function that is used by LocalVault and CachingRemote.
 pub fn read(file: Inode, offset: i64, size: u32, fd_map: &FdMap) -> VaultResult<Vec<u8>> {
-    let fd_lck = fd_map.get(file, false)?;
-    let mut fd = fd_lck.lock().unwrap();
-    let mut buf = vec![0; size as usize];
-    if offset >= 0 {
-        fd.seek(SeekFrom::Start(offset as u64))?;
-    } else {
-        fd.seek(SeekFrom::End(offset))?;
-    }
-    // Read exactly SIZE bytes, if not enough, read to EOF but don't
-    // error.
-    match fd.read_exact(&mut buf) {
-        Ok(()) => Ok(buf),
-        Err(err) => {
-            if err.kind() == std::io::ErrorKind::UnexpectedEof {
-                fd.read_to_end(&mut buf)?;
-                Ok(buf)
-            } else {
-                Err(VaultError::IOError(err))
-            }
-        }
-    }
+    // let fd_lck = fd_map.get(file, false)?;
+    // let mut fd = fd_lck.lock().unwrap();
+    // let mut buf = vec![0; size as usize];
+    // if offset >= 0 {
+    //     fd.seek(SeekFrom::Start(offset as u64))?;
+    // } else {
+    //     fd.seek(SeekFrom::End(offset))?;
+    // }
+    // // Read exactly SIZE bytes, if not enough, read to EOF but don't
+    // // error.
+    // match fd.read_exact(&mut buf) {
+    //     Ok(()) => Ok(buf),
+    //     Err(err) => {
+    //         if err.kind() == std::io::ErrorKind::UnexpectedEof {
+    //             fd.read_to_end(&mut buf)?;
+    //             Ok(buf)
+    //         } else {
+    //             Err(VaultError::IOError(err))
+    //         }
+    //     }
+    // }
+    let path = fd_map.compose_path(file, false);
+    let mut fd = File::open(&path)?;
+    let file_size = fd.metadata()?.len();
+    let read_size = std::cmp::min(size, file_size.saturating_sub(offset as u64) as u32);
+    let mut buffer = vec![0; read_size as usize];
+    fd.seek(SeekFrom::Start(offset as u64))?;
+    fd.read_exact(&mut buffer)?;
+    Ok(buffer)
 }
 
 pub fn write(file: Inode, offset: i64, data: &[u8], fd_map: &FdMap) -> VaultResult<u32> {
-    let fd_lck = fd_map.get(file, true)?;
-    let mut fd = fd_lck.lock().unwrap();
+    // let fd_lck = fd_map.get(file, true)?;
+    // let mut fd = fd_lck.lock().unwrap();
+    let path = fd_map.compose_path(file, false);
+    let mut fd = OpenOptions::new().write(true).open(&path)?;
     if offset >= 0 {
         fd.seek(SeekFrom::Start(offset as u64))?;
     } else {
