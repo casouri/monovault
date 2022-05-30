@@ -1,15 +1,19 @@
 #+TITLE: File Sharing with 0 Responsibility
 #+LATEX_HEADER: \usepackage[bitstream-charter]{mathdesign}
 #+LATEX_HEADER: \usepackage[left=1in,right=1in]{geometry}
+#+LATEX_HEADER: \usepackage{tikz-cd}
+#+LATEX_HEADER: \usetikzlibrary{cd}
 #+LATEX_CLASS_OPTIONS: [letter,11pt,twoside,twocolumn]
 #+LATEX_CLASS: extarticle
 #+OPTIONS: toc:nil author:nil
 
 * Abstract
 
+TBC
+
 * Introduction
 
-In this report we present a distributed FUSE filesystem aimed at personal/family file sharing between multiple hosts. We have a certain set of goals when designing the system: We want to maximize availability for our system. We want to maximize simplicity of our system, for both the virtue of simplicity itself and the limit in resources, e.g., time. And we want our system to be reasonably simply to use, but without hiding too much details so that users cannot understand it or control it.
+In this report we present a distributed FUSE filesystem aimed at personal/family file sharing between multiple hosts. We have a certain set of goals when designing the system: We want to maximize the availability for our system. We want to maximize the simplicity of our system, for both the virtue of simplicity itself and the limit in resources. And we want our system to be reasonably simply to use, but without hiding too much details so that users cannot easily understand it or control it.
 
 These goals are derived from our dissatisfaction of contemporary network filesystems like iCloud, Dropbox, SSHFS, etc. They either gives user little control over the system, or assumes network is always connected [fn:ucsd], or does not integrate with local file system transparently.
 
@@ -25,7 +29,7 @@ Unlike Bayou, which relies on application to provide a semantic for resolving co
 
 SSHFS focuses on conveniently mounting a remote machine through SSH, and doesn’t provide good disconnection operation. It doesn’t interconnect multiple hosts mutually, either.
 
-TODO: mention savaging and versioning.
+The main interesting bit of our system, comparing to Coda, is its ability to “savage“ files: when a host Alice is not connected, a host Bob could savage files owned by Alice from Charlie, if Charlie has previously access that file and cached it. Our versioning system complements savaging, and uses a major version plus a minor version. This versioning system allows us to perverse more work when resolving conflict, which see.
 
 [fn:ucsd] Which is a horrible assumption to be made when one is on UCSD campus.
 
@@ -33,20 +37,22 @@ TODO: mention savaging and versioning.
 
 In this section we describe the high-level design of our system, the operational semantic it provides, and compare our semantic to that of Coda and Bayou.
 
-** High-level design
+** High-level overview
 
-As we have previously described, each host possess a local vault that it owns and shares, and every hosts vault combines into a global filesystem that is mounted onto each host. An example is shown in ref:fig:global_filesystem.
+As we previously described, each host possess a local vault that it owns and shares, and every hosts vault combines into a global filesystem that is mounted onto each host. An example is shown in ref:fig:global_filesystem.
 
 #+begin_export latex
 \begin{figure}
+\begin{center}
 % https://q.uiver.app/?q=WzAsNCxbMSwwLCIvIl0sWzAsMSwiQWxpY2UiXSxbMSwxLCJCb2IiXSxbMiwxLCJDaGFybGllIl0sWzAsMV0sWzAsMl0sWzAsM11d
-\[\begin{tikzcd}
+\begin{tikzcd}
 	& {/} \\
 	Alice & Bob & Charlie
 	\arrow[from=1-2, to=2-1]
 	\arrow[from=1-2, to=2-2]
 	\arrow[from=1-2, to=2-3]
-\end{tikzcd}\]
+\end{tikzcd}
+\end{center}
 \label{fig:global_filesystem}
 \caption{In a system with three hosts, Alice, Bob, and Charlie, the file system contains all three of their vaults.}
 \end{figure}
@@ -77,7 +83,7 @@ When disconnected, meaning the owner of the vault lost contact, the semantics is
 
 - open :: If a local copy exists, that version is used, even if other connected hosts has newer versions, because we assume such condition is rare. If a local copy does not exist, the filesystem tries to find a copy from other connected hosts, we call this process “savage”. If no one has a copy, the filesystem returns an error[fn:ENETDOWN]. We discuss the consistency implication of savaging below.
 - read/write :: Disconnected read and write are the same as connected one, if the process is able to open the file. Otherwise it can’t read nor write.
-- close :: Closing the file during disconnection actually has the same semantics as when connected: changes are persisted locally on disk, but no guarantee that the owner accepts the change.
+- close :: Closing the file during disconnection actually has the same semantics as when connected: changes are persisted locally on disk, but there is no guarantee that the owner accepts the change.
 - getattr :: During disconnection, metadata query are handled by the local cache. The cache reflect the value of the last successful remote metadata query, because that is when this information is cached. Generally the metadata is fully hoarded as they don’t take much space.
 - delete :: Disconnect metadata modification is handled similarly to Coda. The local filesystem applies the change locally and returns immediately. It also keeps a log of all local operations, and tries to replay it once the remote vault is connected again. A conflict during replay (including file modification and metadata modification) does not abort the process, unlike in Coda. We try to be maximally opportunistic and upsteam as much change as possible.
 - create :: Currently we don’t support creating new files and directories during disconnection. We plan to add this feature in the future.
@@ -286,6 +292,10 @@ Our rpc interface contains all the function in the previous listing, plus:
 
 * Evaluation
 
+In this section, we evaluate the correctness of our system. We verify that features like offline editing, hoarding, savaging and versioned conflict resolution works as we intended.
+
+(describe evaluation env: linux version, rust version, other software, etc)
+
 TBC
 
 * Future work
@@ -300,7 +310,11 @@ Currently in savage and submit requests we send the whole file. In the future we
 
 When a directory changes its access and modification time should change. We currently don’t implement this and the hoarding process cannot tell whether a directory needs to by re-walked.
 
-** More control from the user
+** Persisting background worker’s log
+
+Currently if the program crashes before the background worker finishes its work, those work (submitting files to remote owner) are not retried on restart. However crashing does not damage the consistency we provide: there is virtually no guarantee that a closed file is not lost. Within the system, we enforce consistency by conventional best practices: data files are created before metadata are written to the database, a non-empty directory cannot be deleted, etc.
+
+** More control for the user
 
 Preferably the user can extensively control the system and configure how the system behaves, including how much cache space are reserved, how often to hoard, and being able to fetch directories and files without opening them, evicting directories and files from cache, etc.
 
