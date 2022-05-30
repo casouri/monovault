@@ -175,7 +175,7 @@ impl FS {
                 size: 1,                        // -> This is used.
                 atime: 0,                       // -> TODO: track this
                 mtime: 0,                       // -> TODO: track this
-                version: 0,                     // -> TODO: track this
+                version: (1, 0),                // -> TODO: track this
             })
         } else {
             let vault_lck = self.get_vault(_ino)?;

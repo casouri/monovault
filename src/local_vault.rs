@@ -15,6 +15,8 @@ use std::time;
 // TODO: modifying file currently doesn't update mtime and version of
 // ancestor directories.
 
+/*** Type definitions */
+
 #[derive(Debug)]
 pub struct RefCounter {
     ref_count: Mutex<HashMap<Inode, u64>>,
@@ -44,6 +46,7 @@ pub struct LocalVault {
     data_file_dir: PathBuf,
     /// Database for metadata.
     database: Database,
+    /// File descriptor map.
     fd_map: FdMap,
     /// Counts the number of references to each file, when ref count
     /// of that file reaches 0, the file handler can be closed, and
@@ -51,11 +54,17 @@ pub struct LocalVault {
     ref_count: RefCounter,
     /// Records whether an opened file is modified (written).
     mod_track: RefCounter,
+    /// Records which file was forked, ie, copied by another host. If
+    /// it is forked, next change to the file bumps the major version
+    /// rather than the minor version.
+    fork_track: RefCounter,
     /// The next allocated inode is current_inode + 1.
     current_inode: AtomicU64,
     /// Files waiting to be deleted.
     pending_delete: Vec<Inode>,
 }
+
+/*** RefCounter */
 
 impl RefCounter {
     pub fn new() -> RefCounter {
@@ -115,6 +124,8 @@ impl RefCounter {
         self.ref_count.lock().unwrap().remove(&file);
     }
 }
+
+/*** FdMap */
 
 impl FdMap {
     pub fn new(vault_name: &str, data_file_dir: &Path) -> FdMap {
@@ -193,6 +204,8 @@ impl FdMap {
         Ok(())
     }
 }
+
+/*** Attr/read/write routine shared by local vault and caching remote  */
 
 /// The attr function used by both LocalVault and CachingRemote.
 pub fn attr(file: Inode, database: &mut Database, fd_map: &FdMap) -> VaultResult<FileInfo> {
@@ -286,6 +299,30 @@ pub fn has_file(file: Inode, database: &mut Database) -> VaultResult<bool> {
     }
 }
 
+/// Bump `version` according to `modified` and `fork_track`, possibly
+/// updating `fork_track`. Return the new version. If not modified,
+/// version doesn't change, if forked, bump major version and reset
+/// fork_track, if not, bump minor version.
+pub fn calculate_version(
+    file: Inode,
+    version: FileVersion,
+    modified: bool,
+    fork_track: &mut RefCounter,
+) -> FileVersion {
+    if modified {
+        if fork_track.nonzero(file) {
+            fork_track.zero(file);
+            (version.0 + 1, 0)
+        } else {
+            (version.0, version.1 + 1)
+        }
+    } else {
+        version
+    }
+}
+
+/*** LocalVault methods  */
+
 impl LocalVault {
     /// `name` is the name of the vault, also the directory name of
     /// the vault root. `store_path` is the directory for database and
@@ -310,6 +347,7 @@ impl LocalVault {
             data_file_dir,
             ref_count: RefCounter::new(),
             mod_track: RefCounter::new(),
+            fork_track: RefCounter::new(),
             current_inode: AtomicU64::new(current_inode),
             pending_delete: vec![],
         })
@@ -340,7 +378,45 @@ impl LocalVault {
             Err(VaultError::FileNotExist(file))
         }
     }
+
+    /// Mark `file` as forked, so next change will bump major version.
+    fn mark_forked(&mut self, file: Inode) {
+        self.fork_track.incf(file);
+    }
+
+    /// Serve savage request by searching in "cache".
+    pub fn search_in_cache(&mut self, file: Inode) -> VaultResult<(Vec<u8>, FileVersion)> {
+        let info = attr(file, &mut self.database, &mut self.fd_map)?;
+        let data = read(file, 0, info.size as u32, &mut self.fd_map)?;
+        self.mark_forked(file);
+        Ok((data, info.version))
+    }
+
+    /// Handle submission.
+    pub fn submit(&mut self, file: Inode, data: &[u8], version: FileVersion) -> VaultResult<bool> {
+        let local_version = self.database.attr(file)?.version;
+        if local_version.0 <= version.0 {
+            // Accept.
+            self.write(file, 0, data)?;
+            self.mark_forked(file);
+            let current_time = time::SystemTime::now()
+                .duration_since(time::UNIX_EPOCH)?
+                .as_secs();
+            self.database.set_attr(
+                file,
+                None,
+                Some(current_time),
+                Some(current_time),
+                Some(version),
+            )?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
 }
+
+/*** Vault implementation of LocalVault */
 
 impl Vault for LocalVault {
     fn name(&self) -> String {
@@ -417,8 +493,15 @@ impl Vault for LocalVault {
         let current_time = time::SystemTime::now()
             .duration_since(time::UNIX_EPOCH)?
             .as_secs();
-        self.database
-            .add_file(parent, inode, name, kind, current_time, current_time, 1)?;
+        self.database.add_file(
+            parent,
+            inode,
+            name,
+            kind,
+            current_time,
+            current_time,
+            (1, 0),
+        )?;
         self.ref_count.incf(inode)?;
         info!("created {}", inode);
         Ok(inode)
@@ -460,12 +543,13 @@ impl Vault for LocalVault {
                 .as_secs();
             let modified = self.mod_track.nonzero(file);
             let version = self.database.attr(file)?.version;
+            let new_version = calculate_version(file, version, modified, &mut self.fork_track);
             self.database.set_attr(
                 file,
                 None,
                 Some(current_time),
                 if modified { Some(current_time) } else { None },
-                if modified { Some(version + 1) } else { None },
+                if modified { Some(new_version) } else { None },
             )?;
             // When the file is dropped it is automatically closed. We
             // never store the file elsewhere and ref_count is 0 so

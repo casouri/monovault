@@ -5,7 +5,7 @@ use std::sync::Arc;
 /// caching remote uses this as a backend.
 use crate::rpc;
 use crate::rpc::vault_rpc_client::VaultRpcClient;
-use crate::rpc::FileToWrite;
+use crate::rpc::{FileToWrite, Grail};
 use crate::types::*;
 use log::{debug, info};
 use tokio::runtime::{Builder, Runtime};
@@ -65,7 +65,7 @@ struct WriteIterator {
     data: Vec<u8>,
     offset: usize,
     block_size: usize,
-    version: u64,
+    version: FileVersion,
 }
 
 impl WriteIterator {
@@ -75,7 +75,7 @@ impl WriteIterator {
         data: &[u8],
         offset: usize,
         block_size: usize,
-        version: u64,
+        version: FileVersion,
     ) -> WriteIterator {
         WriteIterator {
             file,
@@ -103,7 +103,8 @@ impl Iterator for WriteIterator {
                 file: self.file,
                 offset: self.offset as i64,
                 data: self.data[self.offset..end].to_vec(),
-                version: self.version,
+                major_ver: self.version.0,
+                minor_ver: self.version.1,
             };
             self.offset = end;
             Some(stuff)
@@ -134,7 +135,8 @@ fn unpack_status(status: Status) -> VaultError {
 
 impl RemoteVault {
     /// Savage for `file` in `vault` in remote's local cache. If found, return (data, version).
-    pub fn savage(&mut self, vault: &str, file: Inode) -> VaultResult<(Vec<u8>, u64)> {
+    pub fn savage(&mut self, vault: &str, file: Inode) -> VaultResult<(Vec<u8>, FileVersion)> {
+        info!("savage(vault={}, file={})", vault, file);
         self.get_client()?;
         let client = self.client.as_mut().unwrap();
         let response = translate_result(self.rt.block_on(client.savage(rpc::Grail {
@@ -143,13 +145,33 @@ impl RemoteVault {
         })))?;
         let mut stream = response.into_inner();
         let mut data = vec![];
-        let mut version = 1;
+        let mut version = (1, 0);
         while let Some(received) = self.rt.block_on(stream.next()) {
             let value = translate_result(received)?;
             data.extend(&value.payload);
-            version = value.version;
+            version = (value.major_ver, value.minor_ver);
         }
         Ok((data, version))
+    }
+
+    pub fn submit(&mut self, file: Inode, data: &[u8], version: FileVersion) -> VaultResult<bool> {
+        info!(
+            "submit(file={}, size={}, version={:?})",
+            file,
+            data.len(),
+            version
+        );
+        self.get_client()?;
+        let client = self.client.as_mut().unwrap();
+        let request = Request::new(tokio_stream::iter(WriteIterator::new(
+            file,
+            data,
+            0,
+            GRPC_DATA_CHUNK_SIZE,
+            version,
+        )));
+        let response = translate_result(self.rt.block_on(client.submit(request)))?;
+        Ok(response.into_inner().flag)
     }
 }
 
@@ -171,7 +193,7 @@ impl Vault for RemoteVault {
             size: v.size,
             atime: v.atime,
             mtime: v.mtime,
-            version: v.version,
+            version: (v.major_ver, v.minor_ver),
         })
     }
 
@@ -208,7 +230,7 @@ impl Vault for RemoteVault {
             offset as usize,
             GRPC_DATA_CHUNK_SIZE,
             // Write is for direct writing, so we don't care about the version.
-            0,
+            (1, 0),
         )));
         let response = translate_result(self.rt.block_on(client.write(request)))?;
         Ok(response.into_inner().value)
@@ -276,7 +298,7 @@ impl Vault for RemoteVault {
                 size: info.size,
                 atime: info.atime,
                 mtime: info.mtime,
-                version: info.version,
+                version: (info.major_ver, info.minor_ver),
             })
             .collect();
         return Ok(result);

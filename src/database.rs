@@ -35,7 +35,8 @@ name char(100),
 type int,
 atime int,
 mtime int,
-version int,
+major_version int,
+minor_version int,
 primary key (file)
 );",
         [],
@@ -47,7 +48,7 @@ primary key (file)
         Ok(_) => Ok(()),
         Err(rusqlite::Error::QueryReturnedNoRows) => {
             connection.execute(
-                "insert into Type (file, name, type, atime, mtime, version) values (1, '/', 1, 0, 0, 1)",
+                "insert into Type (file, name, type, atime, mtime, major_version, minor_version) values (1, '/', 1, 0, 0, 1, 0)",
                 [],
             )?;
             Ok(())
@@ -90,7 +91,7 @@ impl Database {
     /// and needs to be filled.
     pub fn attr(&self, file: Inode) -> VaultResult<FileInfo> {
         let entry = self.db.query_row(
-            "select name, type, atime, mtime, version from Type where file=?",
+            "select name, type, atime, mtime, major_version, minor_version from Type where file=?",
             [file],
             |row| {
                 Ok(FileInfo {
@@ -105,7 +106,7 @@ impl Database {
                     },
                     atime: row.get_unwrap(2),
                     mtime: row.get_unwrap(3),
-                    version: row.get_unwrap(4),
+                    version: (row.get_unwrap(4), row.get_unwrap(5)),
                     // Filled by LocalVault::attr().
                     size: 0,
                 })
@@ -126,7 +127,7 @@ impl Database {
         kind: VaultFileType,
         atime: u64,
         mtime: u64,
-        version: u64,
+        version: (u64, u64),
     ) -> VaultResult<()> {
         info!(
             "add_file(parent={}, child={}, name={}, kind={:?})",
@@ -142,8 +143,8 @@ impl Database {
             VaultFileType::Directory => 1,
         };
         transaction.execute(
-            "insert into Type (file, name, type, atime, mtime, version) values (?, ?, ?, ?, ?, ?)",
-            params![child, name.to_string(), type_val, atime, mtime, version],
+            "insert into Type (file, name, type, atime, mtime, major_version, minor_version) values (?, ?, ?, ?, ?, ?, ?)",
+            params![child, name.to_string(), type_val, atime, mtime, version.0, version.1],
         )?;
         transaction.execute(
             "insert into HasChild (parent, child) values (?, ?)",
@@ -161,7 +162,7 @@ impl Database {
         name: Option<&str>,
         atime: Option<u64>,
         mtime: Option<u64>,
-        version: Option<u64>,
+        version: Option<FileVersion>,
     ) -> VaultResult<()> {
         info!(
             "set_attr(file={}, name={:?}, atime={:?}, mtime={:?}, version={:?})",
@@ -179,8 +180,8 @@ impl Database {
         }
         if let Some(version) = version {
             transaction.execute(
-                "update Type set version=? where file=?",
-                params![version, file],
+                "update Type set major_version=?, minor_version=? where file=?",
+                params![version.0, version.1, file],
             )?;
         }
         transaction.commit()?;

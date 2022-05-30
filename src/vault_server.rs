@@ -7,8 +7,8 @@ use crate::rpc::{
     Grail, Inode, Size,
 };
 use crate::types::{
-    unpack_to_caching, CompressedError, OpenMode, Vault, VaultError, VaultFileType, VaultRef,
-    VaultResult, GRPC_DATA_CHUNK_SIZE,
+    unpack_to_local, CompressedError, FileVersion, GenericVault, OpenMode, Vault, VaultError,
+    VaultFileType, VaultRef, VaultResult, GRPC_DATA_CHUNK_SIZE,
 };
 use async_trait::async_trait;
 use log::{debug, info};
@@ -108,7 +108,8 @@ impl VaultRpc for VaultServer {
             size: res.size,
             atime: res.atime,
             mtime: res.mtime,
-            version: res.version,
+            major_ver: res.version.0,
+            minor_ver: res.version.1,
         }))
     }
     type readStream = ReceiverStream<Result<DataChunk, Status>>;
@@ -144,7 +145,8 @@ impl VaultRpc for VaultServer {
                 let end = std::cmp::min(offset + blk_size, data.len());
                 let reply = DataChunk {
                     payload: data[offset..end].to_vec(),
-                    version,
+                    major_ver: version.0,
+                    minor_ver: version.1,
                 };
                 tx.send(Ok(reply)).await.unwrap();
                 offset = end;
@@ -161,7 +163,7 @@ impl VaultRpc for VaultServer {
         let req = request.into_inner();
         info!("savage(vault={}, file={})", req.vault, req.file);
         // Get data and version from the caching remote vault.
-        let result: VaultResult<(Vec<u8>, u64)> = {
+        let result: VaultResult<(Vec<u8>, FileVersion)> = {
             match self.vault_map.get(&req.vault) {
                 None => {
                     debug!("We don't know this vault");
@@ -169,12 +171,14 @@ impl VaultRpc for VaultServer {
                 }
                 Some(vault) => {
                     let mut vault = vault.lock().unwrap();
-                    let caching_remote = translate_result(unpack_to_caching(&mut vault));
-                    if let Err(_) = &caching_remote {
-                        debug!("Cannot translate to caching remote, probably because we didn't enable caching");
+                    match &mut *vault {
+                        GenericVault::Local(vault) => vault.search_in_cache(req.file),
+                        GenericVault::Caching(vault) => vault.search_in_cache(req.file),
+                        GenericVault::Remote(_) => {
+                            debug!("Cannot serve savage request because we are not caching");
+                            Err(VaultError::WrongTypeOfVault("caching/local".to_string()))
+                        }
                     }
-                    let caching_remote = caching_remote?;
-                    caching_remote.search_in_cache(req.file)
                 }
             }
         };
@@ -191,7 +195,8 @@ impl VaultRpc for VaultServer {
                 let end = std::cmp::min(offset + blk_size, data.len());
                 let reply = DataChunk {
                     payload: data[offset..end].to_vec(),
-                    version,
+                    major_ver: version.0,
+                    minor_ver: version.1,
                 };
                 sender.send(Ok(reply)).await.unwrap();
                 offset = end;
@@ -233,7 +238,33 @@ impl VaultRpc for VaultServer {
         &self,
         request: Request<Streaming<FileToWrite>>,
     ) -> Result<Response<Acceptance>, Status> {
-        todo!()
+        let mut stream = request.into_inner();
+        let mut counter = 0;
+        let mut data: Vec<u8> = vec![];
+        let mut inode = 0;
+        let mut offset = 0;
+        let mut version = (1, 0);
+        while let Some(mut file) = stream.message().await? {
+            info!(
+                "submit[{}](file={}, offset={}, size={})",
+                counter,
+                file.file,
+                file.offset,
+                file.data.len()
+            );
+            counter += 1;
+            inode = file.file;
+            offset = file.offset;
+            data.append(&mut file.data);
+            version = (file.major_ver, file.minor_ver);
+        }
+        // FIXME: write to tmp file by chunk so we don't eat memory.
+        // This way we don't lock the vault when transferring packets on wire.
+        let mut vault = self.local().lock().unwrap();
+        let success = translate_result(
+            translate_result(unpack_to_local(&mut vault))?.submit(inode, &data, version),
+        )?;
+        Ok(Response::new(Acceptance { flag: success }))
     }
 
     async fn create(&self, request: Request<FileToCreate>) -> Result<Response<Inode>, Status> {
@@ -252,6 +283,7 @@ impl VaultRpc for VaultServer {
         ))?;
         Ok(Response::new(Inode { value: inode }))
     }
+
     async fn open(&self, request: Request<FileToOpen>) -> Result<Response<Empty>, Status> {
         let request_inner = request.into_inner();
         let mode = match request_inner.mode {
@@ -263,6 +295,7 @@ impl VaultRpc for VaultServer {
         translate_result(vault.open(request_inner.file, mode))?;
         Ok(Response::new(Empty {}))
     }
+
     async fn close(&self, request: Request<Inode>) -> Result<Response<Empty>, Status> {
         let inner = request.into_inner();
         info!("close({})", inner.value);
@@ -270,6 +303,7 @@ impl VaultRpc for VaultServer {
         translate_result(vault.close(inner.value))?;
         Ok(Response::new(Empty {}))
     }
+
     async fn delete(&self, request: Request<Inode>) -> Result<Response<Empty>, Status> {
         let inner = request.into_inner();
         info!("delete({})", inner.value);
@@ -277,6 +311,7 @@ impl VaultRpc for VaultServer {
         translate_result(vault.delete(inner.value))?;
         Ok(Response::new(Empty {}))
     }
+
     async fn readdir(&self, request: Request<Inode>) -> Result<Response<DirEntryList>, Status> {
         let inner = request.into_inner();
         info!("readdir({})", inner.value);
@@ -293,7 +328,8 @@ impl VaultRpc for VaultServer {
                     size: e.size,
                     atime: e.atime,
                     mtime: e.mtime,
-                    version: e.version,
+                    major_ver: e.version.0,
+                    minor_ver: e.version.1,
                 })
                 .collect(),
         }))

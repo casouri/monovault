@@ -25,7 +25,7 @@ pub enum BackgroundOp {
     /// Create file, name, kind.
     Create(Inode, String, VaultFileType),
     /// Upload file, name, version.
-    Upload(Inode, String, u64),
+    Upload(Inode, String, FileVersion),
 }
 
 impl BackgroundWorker {
@@ -128,7 +128,7 @@ impl BackgroundWorker {
         Ok(())
     }
 
-    fn handle_upload(&mut self, file: Inode, name: &str, version: u64) -> VaultResult<()> {
+    fn handle_upload(&mut self, file: Inode, name: &str, version: FileVersion) -> VaultResult<()> {
         let vault_name = self.remote.lock().unwrap().name();
         info!("handle_upload({}) to {}", file, &vault_name);
         let graveyard_file_path = self.graveyard.join(format!(
@@ -149,7 +149,8 @@ impl BackgroundWorker {
             std::fs::metadata(&graveyard_file_path)?.len()
         );
         fd.read_to_end(&mut buf)?;
-        self.remote.lock().unwrap().write(file, 0, &buf)?;
+        let mut remote = self.remote.lock().unwrap();
+        unpack_to_remote(&mut remote)?.submit(file, &buf, version)?;
         Ok(())
     }
 }

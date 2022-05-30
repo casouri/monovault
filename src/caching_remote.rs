@@ -16,6 +16,7 @@ pub struct CachingVault {
     name: String,
     ref_count: RefCounter,
     mod_track: RefCounter,
+    fork_track: RefCounter,
     database: Database,
     fd_map: Arc<FdMap>,
     /// The remote vault we are using.
@@ -26,6 +27,8 @@ pub struct CachingVault {
     /// Whether to allow disconnected create.
     allow_disconnected_create: bool,
 }
+
+/*** CachingVault methods */
 
 impl CachingVault {
     /// The caching remote takes all the remotes rather than only the
@@ -73,6 +76,7 @@ impl CachingVault {
             name: remote_name.to_string(),
             ref_count: RefCounter::new(),
             mod_track: RefCounter::new(),
+            fork_track: RefCounter::new(),
             fd_map,
             database: Database::new(&db_dir, remote_name)?,
             remote_map,
@@ -86,12 +90,19 @@ impl CachingVault {
         Arc::clone(self.remote_map.get(&self.name).unwrap())
     }
 
+    /// Mark `file` as forked, so next change will bump major version.
+    fn mark_forked(&mut self, file: Inode) {
+        self.fork_track.incf(file);
+    }
+
     /// If someone comes savaging for `file`, look in our cache and
     /// return (data, version) we can find it. If not exist or some
-    /// other error occurs, just return those errors.
-    pub fn search_in_cache(&mut self, file: Inode) -> VaultResult<(Vec<u8>, u64)> {
+    /// other error occurs, just return those errors. This is the
+    /// function called by VaultServer to serve a savage request.
+    pub fn search_in_cache(&mut self, file: Inode) -> VaultResult<(Vec<u8>, FileVersion)> {
         let info = local_vault::attr(file, &mut self.database, &mut self.fd_map)?;
         let data = local_vault::read(file, 0, info.size as u32, &mut self.fd_map)?;
+        self.mark_forked(file);
         Ok((data, info.version))
     }
 
@@ -105,7 +116,10 @@ impl CachingVault {
                 let result = unpack_to_remote(&mut remote.lock().unwrap())?.savage(&my_name, file);
                 match result {
                     Ok((data, version)) => {
-                        debug!("Savage from {} succeeded, version={}", vault_name, version);
+                        debug!(
+                            "Savage from {} succeeded, version={:?}",
+                            vault_name, version
+                        );
                         local_vault::write(file, 0, &data, &mut self.fd_map)?;
                         // Make sure written to data file.
                         self.fd_map.close(file, true)?;
@@ -124,6 +138,8 @@ impl CachingVault {
         Err(VaultError::FileNotExist(file))
     }
 }
+
+/*** Vault implementation of CachingVault */
 
 impl Vault for CachingVault {
     fn name(&self) -> String {
@@ -226,18 +242,20 @@ impl Vault for CachingVault {
             let remote_meta = remote.attr(file)?;
             let our_version = local_vault::attr(file, database, fd_map)?.version;
             debug!(
-                "open({}) => local ver {}, remote ver {}",
+                "open({}) => local ver {:?}, remote ver {:?}",
                 file, our_version, remote_meta.version
             );
-            if our_version < remote_meta.version {
-                // TODO: read by chunk. FIXME: Currently the data
-                // could be newer than the version. Use download which
-                // give us the version with the data.
+            if our_version.0 < remote_meta.version.0 {
+                // FIXME: What if: we made change, not yet submitted,
+                // someone open the file, we fetch the remote newer
+                // version, now our work is lost!
+
+                // TODO: read by chunk.
                 debug!("pulling from remote");
-                let version = remote_meta.version;
-                let data = remote.read(file, 0, remote_meta.size as u32)?;
+                let remote_name = remote.name();
+                let (data, version) = unpack_to_remote(&mut remote)?.savage(&remote_name, file)?;
                 local_vault::write(file, 0, &data, fd_map)?;
-                // Make sure written to data file.
+                // Close to make sure change is written to data file.
                 fd_map.close(file, true)?;
                 database.set_attr(file, None, None, None, Some(version))?;
             }
@@ -293,14 +311,16 @@ impl Vault for CachingVault {
             );
             // Increment the version so we don't fetch the remote
             // version upon next open.
+            let new_version =
+                local_vault::calculate_version(file, info.version, modified, &mut self.fork_track);
             self.database
-                .set_attr(file, None, None, None, Some(info.version + 1))?;
+                .set_attr(file, None, None, None, Some(new_version))?;
             self.fd_map.close(file, modified)?;
             // Add the op to background queue.
             self.log
                 .lock()
                 .unwrap()
-                .push(BackgroundOp::Upload(file, info.name, info.version + 1));
+                .push(BackgroundOp::Upload(file, info.name, new_version));
         } else {
             self.fd_map.close(file, modified)?;
         }
@@ -324,8 +344,15 @@ impl Vault for CachingVault {
                 let current_time = time::SystemTime::now()
                     .duration_since(time::UNIX_EPOCH)?
                     .as_secs();
-                self.database
-                    .add_file(parent, inode, name, kind, current_time, current_time, 1)?;
+                self.database.add_file(
+                    parent,
+                    inode,
+                    name,
+                    kind,
+                    current_time,
+                    current_time,
+                    (1, 0),
+                )?;
                 self.ref_count.incf(inode)?;
                 Ok(inode)
             }
@@ -405,7 +432,13 @@ impl Vault for CachingVault {
                         }
                         // Set version to 0 so file is fetched on open.
                         self.database.add_file(
-                            dir, info.inode, &info.name, info.kind, info.atime, info.mtime, 0,
+                            dir,
+                            info.inode,
+                            &info.name,
+                            info.kind,
+                            info.atime,
+                            info.mtime,
+                            (0, 0),
                         )?;
                     }
                 }

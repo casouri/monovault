@@ -11,6 +11,7 @@ pub type VaultAddress = String;
 pub type Inode = u64;
 pub type VaultRef = Arc<Mutex<GenericVault>>;
 pub type VaultResult<T> = std::result::Result<T, VaultError>;
+pub type FileVersion = (u64, u64);
 
 /// 100 network MB. Packets are split into packets on wire, this chunk
 /// size limit is just for saving memory. (Once we implement chunked
@@ -58,7 +59,7 @@ pub struct FileInfo {
     pub size: u64,
     pub atime: u64,
     pub mtime: u64,
-    pub version: u64,
+    pub version: (u64, u64),
 }
 
 #[derive(Debug, Clone, Copy)]
