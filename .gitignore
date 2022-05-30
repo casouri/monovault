@@ -2,4 +2,4 @@
 src/rpc.rs
 *.bbl
 *.pdf
-*.tex
+
