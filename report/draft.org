@@ -1,0 +1,309 @@
+#+TITLE: File Sharing with 0 Responsibility
+#+LATEX_HEADER: \usepackage[bitstream-charter]{mathdesign}
+#+LATEX_HEADER: \usepackage[left=1in,right=1in]{geometry}
+#+LATEX_CLASS_OPTIONS: [letter,11pt,twoside,twocolumn]
+#+LATEX_CLASS: extarticle
+#+OPTIONS: toc:nil author:nil
+
+* Abstract
+
+* Introduction
+
+In this report we present a distributed FUSE filesystem aimed at personal/family file sharing between multiple hosts. We have a certain set of goals when designing the system: We want to maximize availability for our system. We want to maximize simplicity of our system, for both the virtue of simplicity itself and the limit in resources, e.g., time. And we want our system to be reasonably simply to use, but without hiding too much details so that users cannot understand it or control it.
+
+These goals are derived from our dissatisfaction of contemporary network filesystems like iCloud, Dropbox, SSHFS, etc. They either gives user little control over the system, or assumes network is always connected [fn:ucsd], or does not integrate with local file system transparently.
+
+In return of availability and simplicity, we give up some consistency of our system, opportunistically assume bad things rarely happen. This assumption isn’t unreasonable to take as our target usecase is single-user or faimily file sharing, meaning the number of hosts is small, files updates are occasional, and conflicting modifications are rare.
+
+# We have no statistics to back this observation other than our daily experience.
+
+In our setting, each host has a local “vault”, in which is stores and owns some files. This host wants to access other hosts vault, and want to share files its own vault to others. All of the hosts combine their vaults into a filesystem, in which each vault is a direct subdirectory of the filesystem root. This filesystem is mounted on each host.
+
+There has been abundant prior work on a distributed filesystem, including Coda [[cite:&10.1145/146941.146942]], Bayou [[cite:&10.1145/224057.224070]], and SSHFS [[cite:&10.5555/1134782.1134786]]. Coda makes the distinction between first-class servers and second-class clients. We take an approach closer to Bayou, where there is no distinction of server and client. But under the hood, each host act as the server of its local vault, which it owns and manages. Other hosts’s local copy of this vault succumbs should conflict with the owner of the vault arises.
+
+Unlike Bayou, which relies on application to provide a semantic for resolving conflict, our system provides an ordinary filesystem interface and doesn’t resolve file conflicts automatically.
+
+SSHFS focuses on conveniently mounting a remote machine through SSH, and doesn’t provide good disconnection operation. It doesn’t interconnect multiple hosts mutually, either.
+
+TODO: mention savaging and versioning.
+
+[fn:ucsd] Which is a horrible assumption to be made when one is on UCSD campus.
+
+* Design overview
+
+In this section we describe the high-level design of our system, the operational semantic it provides, and compare our semantic to that of Coda and Bayou.
+
+** High-level design
+
+As we have previously described, each host possess a local vault that it owns and shares, and every hosts vault combines into a global filesystem that is mounted onto each host. An example is shown in ref:fig:global_filesystem.
+
+#+begin_export latex
+\begin{figure}
+% https://q.uiver.app/?q=WzAsNCxbMSwwLCIvIl0sWzAsMSwiQWxpY2UiXSxbMSwxLCJCb2IiXSxbMiwxLCJDaGFybGllIl0sWzAsMV0sWzAsMl0sWzAsM11d
+\[\begin{tikzcd}
+	& {/} \\
+	Alice & Bob & Charlie
+	\arrow[from=1-2, to=2-1]
+	\arrow[from=1-2, to=2-2]
+	\arrow[from=1-2, to=2-3]
+\end{tikzcd}\]
+\label{fig:global_filesystem}
+\caption{In a system with three hosts, Alice, Bob, and Charlie, the file system contains all three of their vaults.}
+\end{figure}
+#+end_export
+
+On each host, access to the local vault is handled locally, and access to other vaults are translated to requests to the remote host that owns that vault. In the same time, the local host serves requests from other hosts for contents in its local vault.
+
+To maximize availability, the local filesystem instance caches remote content and substitute for the remote vault in case of disconnection. During normal operation when the remote vault is connected, the local filesystem “hoards” files preemptively, so that a future disconnect does not stop the user from accessing the files. During disconnection, if the user requests for a file that the filesystem didn’t hoard, the filesystem still tries its best by “savaging” for that file from other connected hosts—maybe they have hoarded it. This is different from Coda, which assumes a client is either connected to the servers (and thus all the files) or not.
+
+In order to keep the system simple, we do not allow file ownership to migrate, the owner of the vault manages that vault, and everyone else contacts the owner to modify the file or metadata in that vault. The owner is the serialization point and the source-of-truth. When the owner cannot be contacted, other host simply holds onto their modification until the owner is online again.
+
+** Semantics
+
+We provide a subset of the functionality normally provided by a filesystem. Notable omissions include not having flush(), no permissions, no hard links, no renaming, no append mode nor read-only mode. Below we discuss the semantics of representative operations in connected and disconnected contexts for remote files.
+
+When connected, file operations on remote files have the following semantics:
+
+- open :: Successfully opening a file downloads the whole file to a local copy, meaning following read and write does not fail even if the remote vault lose contact.
+- read :: Reading a remote file reads the local copy of the file rather than the latest version available on the remove vault, even if the local filesystem is connected to the remote vault. This means only other local concurrent access to the same file can affect the process using that file, similar to other UNIX filesystems. But processes on other hosts does not affect processes on this host before the file is closed.
+- write :: Similar to read, write only writes to the local copy and the change is not guaranteed to persist.
+- close :: Successfully closing a file ensures the modification are written to local disk and thus persists (until another process overwrites it). But there is no guarantee that this version will be accepted by the owner.
+- getattr :: Operations that retrieve metadata like lookup(), open(), readdir(), getattr() directly contacts the remote vault for metadata when connection is up. That is, they reflect the current state of the remote vault at time of operation. It is possible that a file is deleted remotely before it is closed locally. In that case, just like conventional UNIX filesystem, the process opened the file can still access the file before it closes it, and other processes cannot access that file anymore.
+- create/delete :: Operations that modifies metadata like setattr(), create(), mkdir(), rmdir(), unlink() directly contacts the remote vault when connection is up.
+
+Overall, operations when connected are less interesting and we provide similar semantics to Coda and Bayou. Both Coda and our system fetches the whole file on open.
+
+When disconnected, meaning the owner of the vault lost contact, the semantics is slightly different:
+
+- open :: If a local copy exists, that version is used, even if other connected hosts has newer versions, because we assume such condition is rare. If a local copy does not exist, the filesystem tries to find a copy from other connected hosts, we call this process “savage”. If no one has a copy, the filesystem returns an error[fn:ENETDOWN]. We discuss the consistency implication of savaging below.
+- read/write :: Disconnected read and write are the same as connected one, if the process is able to open the file. Otherwise it can’t read nor write.
+- close :: Closing the file during disconnection actually has the same semantics as when connected: changes are persisted locally on disk, but no guarantee that the owner accepts the change.
+- getattr :: During disconnection, metadata query are handled by the local cache. The cache reflect the value of the last successful remote metadata query, because that is when this information is cached. Generally the metadata is fully hoarded as they don’t take much space.
+- delete :: Disconnect metadata modification is handled similarly to Coda. The local filesystem applies the change locally and returns immediately. It also keeps a log of all local operations, and tries to replay it once the remote vault is connected again. A conflict during replay (including file modification and metadata modification) does not abort the process, unlike in Coda. We try to be maximally opportunistic and upsteam as much change as possible.
+- create :: Currently we don’t support creating new files and directories during disconnection. We plan to add this feature in the future.
+
+During disconnection, Coda only consults the local cache, while our system savages for the file from other connected hosts. After all, it doesn’t make much sense to not provide service if there is a copy and we can access it. In this sense we are closer in spirit to Bayou. We handle conflicts similar to Coda, i.e., we make reasonable effort in the range of our ability—even though that range is rather limited due to the primitive interface we expose. Bayou can do significantly more, at the cost of requiring more involvement from applications.
+
+[fn:ENETDOWN] We decide to return ENETDOWN rather than ENOENT. This is a relatively arbitrary decision, we think either choice makes sense and this choice could be user-configurable.
+
+** Maximally opportunistic and minimally responsible
+
+Because we assume conflicts rarely happen and most hosts are connected to each other most of the time, and we try to maximize availability and simplicity, our system makes minimum effort on enforcing consistency.
+
+For example, when the owner is disconnected and we have a local copy, we do not check for more recent copied that could exist on other connected hosts. This decision is made because we assume most hosts are mostly connected, and thus most of the time the local copy is the up-to-date version. By not querying other hosts, we can serve the user immediately.
+
+When savaging, we return with the first copy we find. Because, again, we assume most likely everybody has the most up-to-date version.
+
+When Coda tries to save user’s work and spits out diffs when reintegration failed, we don’t even try to do that. If a version lost a race, it is gone—next open fetches the remote version. If a remote host made changes to files in the local vault and submitted the change, the local file is immediately overwritten, even if some process are accessing it. We made this decision to simplify our implementation and we assume such conflicts rarely happens in the use-case of our system. If a user wants more safety, they can use version control system and auto-backup features available on most text editors.
+
+#+begin_export latex
+\begin{figure}
+% https://q.uiver.app/?q=WzAsOSxbNCwxLCJmIl0sWzQsMCwiXFx0ZXh0e0FsaWNlfSJdLFsyLDEsImYiXSxbMiwwLCJcXHRleHR7Qm9ifSJdLFsyLDIsImYnIl0sWzAsMiwiZiciXSxbMCwwLCJDaGFybGllIl0sWzAsMywiZicnIl0sWzQsNCwiPyJdLFswLDJdLFsyLDRdLFs0LDVdLFs1LDddLFs3LDhdLFs0LDhdXQ==
+\begin{tikzcd}
+	Charlie && {\text{Bob}} && {\text{Alice}} \\
+	&& f && f \\
+	{f'} && {f'} \\
+	{f''} \\
+	&&&& {?}
+	\arrow[from=2-5, to=2-3]
+	\arrow[from=2-3, to=3-3]
+	\arrow[from=3-3, to=3-1]
+	\arrow[from=3-1, to=4-1]
+	\arrow[from=4-1, to=5-5]
+	\arrow[from=3-3, to=5-5]
+\end{tikzcd}
+\caption{Bob fetches from Alice, Charlie savages from Bob. When Alice comes back online, either Bob’s or Charlie’s version could win.}
+\label{fig:race}
+\end{figure}
+#+end_export
+
+** Versioning and conflict resolution
+
+The addition of savaging brings an interesting case into conflict resolution. Consider such a case (illustrated in figure ref:fig:race): host Alice has a file $f$, which host Bob fetched and cached. Then Alice goes offline, and Bob makes some changes to $f$ to become $f'$. Now host Charlie tries to fetch $f$ from Alice but couldn’t, and savages $f'$ from Bob. Charlie proceed to change $f'$ to $f''$. Now Alice is back online, Bob and Charlie both race to submit their version to Alice. One of the output is actually better than the other: If Charlie wins, both his and Bob’s work are submitted; but if Bob wins, Charlie’s work cannot be submitted to Alice and he has to manually resolve the conflict.
+
+We designed our versioning system such that Charlie always win. Specifically, even if Bob submitted before Charlie, Charlie’s version will overwrite Bob’s; and if Charlie submitted before Bob, Bob’s older version cannot overwrite Charlie’s.
+
+We model fetching, savaging and submitting files as a dependency tree, fetching and savaging are modeled as a fork, and submitting a merge. A version consists of a major version number and a minor version number. The first change to a file after a fork bumps the major version number, and all subsequent changes only bumps the minor version number, until next fork. Merging and forking operations don’t change the version.
+
+Figure ref:fig:versioning gives an example of forking and merging: Bob forks a file at version 1.0 from Alice, the first change to the file bumps it to version 2.0. Then Charlie forks the file from Bob. Both Bob’s and Charlie’s next change to the file bumps the version to 3.0. Bob proceeds to make another change and brings the version to 3.1. Charlie made two changes and brings the version to 3.2. Then Dave forks from Charlie, so Charlie’s and Dave’s next change bumps the version to 4.0.
+
+When Alice comes online, Bob’s submits version 3.1 first and succeeds. Then Charlie submits his version 4.0 and wins, overwriting Bob’s version. Dave’ tries to submit version 4.0 but fails.
+
+An interesting implication of this version system is that, forking your version to other hosts, like Charlie did, increases your chance of winning and preserving your work. This is desirable because we want the version most people hold to win.
+
+Note that when the owner (Alice in our example) can be contacted, our system do not bother to query other hosts for newer versions, because we assume that if the owner is online, any change made by other hosts are promptly submitted back to the owner, and there is no need to query all the hosts.
+
+#+begin_export latex
+\begin{figure}
+% https://q.uiver.app/?q=WzAsMTksWzAsMCwiXFx0ZXh0e0FsaWNlfSJdLFsxLDAsIlxcdGV4dHtCb2J9Il0sWzIsMCwiXFx0ZXh0e0NoYXJsaWV9Il0sWzMsMCwiXFx0ZXh0e0RhdmV9Il0sWzAsMSwiMS4wIl0sWzEsMSwiMS4wIl0sWzEsMiwiMi4wIl0sWzEsMywiMy4wIl0sWzIsMywiMy4wIl0sWzEsNCwiMy4xIl0sWzIsNCwiMy4xIl0sWzIsNSwiMy4yIl0sWzMsNSwiMy4yIl0sWzIsNiwiNC4wIl0sWzAsNCwiMy4xIl0sWzAsNiwiNC4wIl0sWzIsMiwiMi4wIl0sWzMsNywiNC4wIl0sWzAsNywiXFx0aW1lcyJdLFs0LDVdLFs1LDZdLFs2LDddLFs3LDldLFs4LDEwXSxbMTAsMTFdLFsxMSwxM10sWzksMTRdLFsxMywxNV0sWzExLDEyXSxbNiwxNl0sWzE2LDhdLFsxMiwxN10sWzE3LDE4XV0=
+\begin{tikzcd}
+	{\text{Alice}} & {\text{Bob}} & {\text{Charlie}} & {\text{Dave}} \\
+	{1.0} & {1.0} \\
+	& {2.0} & {2.0} \\
+	& {3.0} & {3.0} \\
+	{3.1} & {3.1} & {3.1} \\
+	&& {3.2} & {3.2} \\
+	{4.0} && {4.0} \\
+	\times &&& {4.0}
+	\arrow[from=2-1, to=2-2]
+	\arrow[from=2-2, to=3-2]
+	\arrow[from=3-2, to=4-2]
+	\arrow[from=4-2, to=5-2]
+	\arrow[from=4-3, to=5-3]
+	\arrow[from=5-3, to=6-3]
+	\arrow[from=6-3, to=7-3]
+	\arrow[from=5-2, to=5-1]
+	\arrow[from=7-3, to=7-1]
+	\arrow[from=6-3, to=6-4]
+	\arrow[from=3-2, to=3-3]
+	\arrow[from=3-3, to=4-3]
+	\arrow[from=6-4, to=8-4]
+	\arrow[from=8-4, to=8-1]
+\end{tikzcd}
+\caption{Bob forks from Alice, Charlie forks from Bob, Dave forks from Charlie. The first change after a fork bumps the major version, subsequen changes bump the minor version. The version with a larger major version wins a conflict; if the major version is the same, the first submission wins the conflict.}
+\label{fig:versioning}
+\end{figure}
+#+end_export
+
+#+begin_export latex
+\begin{figure*}
+\begin{center}
+\begin{tikzcd}[sep=small]
+	userspace &&&& {\text{RemoteClient}} \\
+	& LocalVault &&& \vdots \\
+	&& VaultServer && {\text{RemoteClient}} \\
+	FUSE & RemoteClient &&& {\text{RemoteClient}} & {\text{FUSE}} \\
+	& RemoteClient && {\text{VaultServer}} \\
+	& \vdots &&& {\text{LocalVault}} && {} \\
+	& RemoteClient &&&& {\text{userspace}}
+	\arrow[from=1-1, to=4-1]
+	\arrow[bend left=30, from=4-1, to=2-2]
+	\arrow[from=4-1, to=4-2]
+	\arrow[from=3-3, to=2-2]
+	\arrow["rpc", dashed, from=4-5, to=3-3]
+	\arrow[from=5-4, to=6-5]
+	\arrow["rpc"', dashed, from=4-2, to=5-4]
+	\arrow[from=4-6, to=4-5]
+	\arrow[bend left=30, from=4-6, to=6-5]
+	\arrow[from=7-6, to=4-6]
+	\arrow[from=3-3, to=4-2]
+	\arrow[from=5-4, to=4-5]
+	\arrow[bend right=30, from=4-1, to=5-2]
+	\arrow[bend right=30, from=4-6, to=3-5]
+	\arrow[bend right=30, from=4-1, to=7-2]
+	\arrow[bend right=30, from=4-6, to=1-5]
+	\arrow[from=3-3, to=5-2]
+	\arrow[from=3-3, to=7-2]
+	\arrow[from=5-4, to=3-5]
+	\arrow[from=5-4, to=1-5]
+\end{tikzcd}
+\end{center}
+\caption{Two monovault instances typed in italics and roman, respectively. Arrows go in the direction of requests. Dashed arrows represent rpc requests over the network.}
+\label{fig:modules}
+\end{figure*}
+#+end_export
+
+* Implementation
+** Modularization
+
+In this section we introduce our design details. We compartmentalized our system into modules, each providing service to each other. Figure ref:fig:modules demonstrates the interaction between each modules and between monovault instances. The FUSE module implements the FUSE API and provides service to the userspace. It delegates requests to each vault modules. A vault module can be either a local vault which stores files locally or a remote vault module that sends requests through rpc to remote hosts and caches copies locally.
+
+Each monovault instance also runs a vault server than handles requests from other hosts. Similar to the FUSE module, it delegates requests to the vault modules. Normally the server only delegate requests to the local vault modules, which serves the local, owned vault. A vault server occasionally delegate request to a remote vault instance—that’s when its client are savaging for files.
+
+** FUSE module
+
+One interesting tasks that the FUSE module performs is to translate inode numbers. In our system, files are identified by inode numbers. Each vault uses its own independent number space for inode numbers. Therefore, to combine multiple vaults under a single file system and not have inode number conflicts, the FUSE layer translates between vault-local inode numbers and global inode numbers. Specifically, a 64 bit global inode number is split into a 16 bit prefix and a 48 bit body. Each vault is assigned a 16 bit prefix and gets 48 bits of local-inode space. The global inode is then simply the 16 bit prefix concatenated with the 48 bit local inode.
+
+Note that the “global“ inode number is not a global consensus of every host. Rather, it is entirely local and ephemeral to the host—upon restart, the filesystem could give each vault a different prefix. It is only used for accommodating individual vaults under a single filesystem.
+
+** Vaults
+
+Figure ref:fig:vaults illustrates the flow of requests from the FUSE module to LocalVault and CachingRemote module on the other host. We explain below what does each module does.
+
+- LocalVault :: The local vault needs to manage two things: file data and file metadata. File data are simply stored in the filesystem of the host OS as individual files. Metadata are recorded and managed in a SQLite database. When a file is recorded in the database, its data file must exist on disk. Directories live entirely in the database and have no associated data files.
+
+- VaultServer :: The vault server runs in the background and serves rpc requests from remote hosts. For requests on the local vault, it simply delegates the request to the local vault; for requests on remote vaults (savaging requests), it delegate requests to them.
+
+- RpcClient and DirectRemote :: Accompanying vault servers are rpc clients, similar to servers, then simply relay requests to rpc. They are not displayed in the figure due to space constraint. Since RpcClients already implement most of the vault features, we allow user to connect to a vault directly without caching. And all FUSE requests go straight to the LocalVault on the other host, through rpc client and vault server.
+
+- CachingRemote :: The caching remote module send requests to remote vault servers (through rpc clients), and caches result locally. In addition, they serve savage requests for local vault server.
+
+- BackgroundWorker :: All write requests are sent to the background worker, so we can return immediately. BackgroundWorker runs in a different thread and sends write and submit requests to the remote server.
+
+#+begin_export latex
+\begin{figure*}
+\begin{center}
+% https://q.uiver.app/?q=WzAsOCxbMCw3LCJcXHRleHR7RGlyZWN0UmVtb3RlfSJdLFsyLDcsIlxcdGV4dHtDYWNoaW5nUmVtb3RlfSJdLFsxLDIsIlxcdGV4dHtWYXVsdFNlcnZlcn0iXSxbMCwwLCJcXHRleHR7TG9jYWxWYXVsdH0iXSxbMiwwLCJcXHRleHR7Q2FjaGluZ1JlbW90ZX0iXSxbMSw0LCJcXHRleHR7UnBjQ2xpZW50fSJdLFsxLDksIlxcdGV4dHtGVVNFfSJdLFsxLDYsIlxcdGV4dHtCYWNrZ3JvdW5kV29ya2VyfSJdLFsyLDQsInNhdmFnZSIsMV0sWzIsMywicmVhZCx3cml0ZSxzdWJtaXQsc2F2YWdlIiwxXSxbMSw1LCJzYXZhZ2UiLDFdLFswLDUsInJlYWQiLDFdLFs1LDIsInJwYyIsMSx7InN0eWxlIjp7ImJvZHkiOnsibmFtZSI6ImRhc2hlZCJ9fX1dLFs2LDBdLFs2LDFdLFs3LDUsIndyaXRlLHN1Ym1pdCIsMV0sWzEsNywic3VibWl0IiwxXSxbMCw3LCJ3cml0ZSIsMV1d
+\begin{tikzcd}
+	{\text{LocalVault}} && {\text{CachingRemote}} \\
+	\\
+	& {\text{VaultServer}} \\
+	\\
+	& {\text{RpcClient}} \\
+	\\
+	& {\text{BackgroundWorker}} \\
+	{\text{DirectRemote}} && {\text{CachingRemote}} \\
+	\\
+	& {\text{FUSE}}
+	\arrow["savage"{description}, from=3-2, to=1-3]
+	\arrow["{read,write,submit,savage}"{description}, from=3-2, to=1-1]
+	\arrow["savage"{description}, from=8-3, to=5-2]
+	\arrow["read"{description}, from=8-1, to=5-2]
+	\arrow["rpc"{description}, dashed, from=5-2, to=3-2]
+	\arrow[from=10-2, to=8-1]
+	\arrow[from=10-2, to=8-3]
+	\arrow["{write,submit}"{description}, from=7-2, to=5-2]
+	\arrow["submit"{description}, from=8-3, to=7-2]
+	\arrow["write"{description}, from=8-1, to=7-2]
+\end{tikzcd}
+\end{center}
+\caption{The dierct and caching remote on the bottom receives requests from the FUSE modules and sends requests to the remote vault server through rpc. Direct remote sends read and write requests, caching remote sends savage and submit requests. Write and submit requests are sent asynchronisely by BackgroundWorker.}
+\label{fig:vaults}
+\end{figure*}
+#+end_export
+
+** The hoarder
+
+The hoarder is simply another thread that walks the directory tree of each vault and stores all the metadata locally. Currently it does not pre-fetch files. TODO
+
+** Interface between FUSE and vault
+
+- attr(file) :: Return the attribute of /file/.
+- read(file, offset, size) :: Read /file/.
+- write(file, offset, data) :: Write /file/.
+- create(parent, name, type) :: Create a file with /name/ under /parent/, /type/ can be file or directory.
+- open(file) :: Open /file/.
+- close(file) :: Close /file/.
+- delete(file) :: Delete file.
+- readdir(dir) :: List entries in /dir/.
+
+** RPC interface
+
+Our rpc interface contains all the function in the previous listing, plus:
+
+- savage(vault, file) :: Savage /file/ in /vault/. The receiver of this request doesn’t have to be the owner of /vault/. This request returns both file content and file version.
+- submit(file, version) :: Submits /file/ at /version/ to the owner.
+
+* Evaluation
+
+TBC
+
+* Future work
+
+Due to time constraint, we are unable to implement some features that a sensible filesystem ought to have. We consider those future work.
+
+** More efficient file transfer
+
+Currently in savage and submit requests we send the whole file. In the future we plan to incorporate more efficient ways, like the rsync algorithm [[cite:&1885-40765]].
+
+** Updating atime and mtime of directories
+
+When a directory changes its access and modification time should change. We currently don’t implement this and the hoarding process cannot tell whether a directory needs to by re-walked.
+
+** More control from the user
+
+Preferably the user can extensively control the system and configure how the system behaves, including how much cache space are reserved, how often to hoard, and being able to fetch directories and files without opening them, evicting directories and files from cache, etc.
+
+
+bibliographystyle:plain
+bibliography:zotero.bib

@@ -1,0 +1,59 @@
+#+TITLE: Progress Report
+# #+LATEX_HEADER: \usepackage[margin=0.5in]{geometry}
+#+LATEX_HEADER: \usepackage[bitstream-charter]{mathdesign}
+#+LATEX_CLASS_OPTIONS: [a4paper,11pt,twoside,twocolumn]
+#+LATEX_CLASS: extarticle
+# #+OPTIONS: author:nil
+#+AUTHOR: Yuan Fu, Xuanzhu Zhou, Linfang He
+#+EMAIL: yuf011@ucsd.edu, xuz004@ucsd.edu, l8he@ucsd.edu
+
+* Artifact
+
+We intend to complete a FUSE filesystem program that provides distributed network file access.
+
+* High-level design
+
+We plan to implement a distributed file system using FUSE. The system is aimed at personal/family settings where the scale is relatively small but disconnections are abundant and network condition is suboptimal. At a high level, we want our system to almost never block. We want to expose enough information to the user to understand the system, i.e., not fully transparent. We expect concurrent access to be rare. Write conflict is acceptable as long as versions that lost the race are backed up locally.
+
+Consider a setup with multiple hosts where each host has a directory that it wants to share with others. We call the to-be-shared directory a “vault”. Our filesystem combines vaults on all host into a single file system and present it on every host. Under the root directory of the file system are vaults, each represented by a subdirectory.
+
+When network connection is up, a user should be able to read and modify any file, create and delete files and directories, regardless of which vault they are in. When network connection is down, the user should be able to read and write some of the files normally, and any change should be reflected back to the original vault when connection is back on.
+
+* Existing software / package used
+
+We are writing our program in Rust. Notably we use the following Rust packages:
+- fuser :: A FUSE library interface.
+- rusqlite :: A SQLite interface.
+- tonic :: Provides gRPC support.
+
+* Progress
+
+Our plan for the checkpoint was to fully implement the local file system plus remote read. Right now our local file system can serve all normal file operations like listing directory, creating, reading, writing and deleting files and directories. Our filesystem also tracks file modification and access time. Directory access and modification tracking are not yet in place. Permission is not planned nor implemented.
+
+Remote vaults are accessed by gRPC. Remote vaults currently do not support disconnection and do not synchronize local copies to remote file owner. However, we can open and read remote files provided that connection is up.
+
+* Evaluation plan
+
+We consider our project successful it we are able to produce a FUSE filesystem program that runs reliably locally and remotely on multiple hosts, and can correctly handle disconnection according to our disconnection semantics. It should at least handle small files gracefully (below hundreds of MB).
+
+We plan to test our filesystem with basic shell scripts that list directories, retrieve file attributes, read/write to files, and create/delete files and directories.
+
+If available, we would like to request some magic dust that expels bugs from software when sprinkled gently on top. We’d also like some more of time.
+
+* Design
+
+While working on the implementation we revised and further crystallized our design. Below we describe the current design in detail.
+
+** Implementaion
+
+Files are identified by inode numbers. Each vault uses its own independent number space for inode numbers. Therefore, to combine multiple vaults under a single file system and not have inode number conflicts, the FUSE layer translates between vault-local inode numbers and global inode numbers. Specifically, a 64 bit global inode number is split into a 16 bit prefix and a 48 bit body. Each vault is assigned a 16 bit prefix and gets 48 bits of local-inode space. The global inode is then simply the 16 bit prefix concatenated with the 48 bit local inode.
+
+The local vault needs to manage two things: file data and file metadata. File data are simply stored in local file system as individual files. Metadata are recorded and managed in a SQLite database. When a file is recorded in the database, its data file must exist on disk (although the converse is not necessarily true). Directories live entirely in the database and have no associated data file.
+
+Each file (inode) has the following metadata: name, atime (last access time), mtime (last modified time), version, and type (regular file or directory). Additionally, files can be in a parent-child relationship with each other, but parent can only be a directory. Name change is not implemented but is possible, atime and mtime are reflected only on file close, version is only incremented on file close and only increment when file is written.
+
+** Semantics
+
+The semantic our file system provides are similar to that of conventional UNIX file system: once a file is successfully opened, read and write generally will not fail, even if the file is remote and connection broke. Opening a remote file gives the latest version of the remote file. When the file is closed, its content reaches disk and persists. If the file is remote, the file is synchronized to its original owner (eventually, when connection resumes) but there is no guarantee that the file will be successfully replicated remotely: if the remote version is newer, next open will present the remote version rather than the version last seen before closing the file. However, should that happen, the local version is copied to a “graveyard” that stores all the files that lost a race, so no work is lost.
+
+There is a complication when the same file is opened by multiple processes in the same time. The open and close semantic described above only apply when the open is the first open to the file, and the close is the last close to the file. Opening an already opened file do not give the physically latest remote version, but still uses the version fetching on the first open. Closing a file that is still refereed to by other process does not synchronize the local copy to remote.
