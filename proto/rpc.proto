@@ -18,6 +18,10 @@ message Inode {
   uint64 value = 1;
 }
 
+message Acceptance {
+  bool flag = 1;
+}
+
 message FileInfo {
   uint64 inode = 1;
   string name = 2;
@@ -42,12 +46,18 @@ message FileToWrite {
   uint64 file = 1;
   int64 offset = 2;
   bytes data = 3;
+  uint64 version = 4;
 }
 
 message FileToCreate {
   uint64 parent = 1;
   string name = 2;
   VaultFileType kind = 3;
+}
+
+message Grail {
+  string vault = 1;
+  uint64 file = 2;
 }
 
 message FileToOpen {
@@ -61,12 +71,15 @@ message FileToOpen {
 
 message DataChunk {
   bytes payload = 1;
+  uint64 version = 2;
 }
 
 service VaultRPC {
   rpc attr(Inode) returns (FileInfo);
   rpc read(FileToRead) returns (stream DataChunk);
   rpc write(stream FileToWrite) returns (Size);
+  rpc savage(Grail) returns (stream DataChunk);
+  rpc submit(stream FileToWrite) returns (Acceptance);
   rpc create(FileToCreate) returns (Inode);
   rpc open(FileToOpen) returns (Empty);
   rpc close(Inode) returns (Empty);

@@ -77,12 +77,13 @@ pub enum VaultError {
     DirectoryNotEmpty(Inode),
     FileAlreadyExist(Inode, String),
     // Error that are returned from remote vault.
-    RpcError(tonic::transport::Error),
+    RpcError(String),
     RemoteError(String),
     // All errors below are squashed into a RemoteError if returned
     // from a remove vault. They are returned normally if from a local
     // vault.
     NoCorrespondingVault(Inode),
+    WrongTypeOfVault(String),
     CannotFindVaultByName(String),
     U64Overflow(u64),
     U64Underflow(u64),
@@ -112,7 +113,7 @@ impl From<time::SystemTimeError> for VaultError {
 
 impl From<tonic::transport::Error> for VaultError {
     fn from(err: tonic::transport::Error) -> Self {
-        VaultError::RpcError(err)
+        VaultError::RpcError(format!("{}", err))
     }
 }
 
@@ -136,21 +137,23 @@ impl From<VaultError> for CompressedError {
             VaultError::NotDirectory(inode) => CompressedError::NotDirectory(inode),
             VaultError::IsDirectory(inode) => CompressedError::IsDirectory(inode),
             VaultError::DirectoryNotEmpty(inode) => CompressedError::DirectoryNotEmpty(inode),
+            VaultError::CannotFindVaultByName(name) => CompressedError::CannotFindVaultByName(name),
+            VaultError::FileAlreadyExist(inode, name) => {
+                CompressedError::FileAlreadyExist(inode, name)
+            }
+
             VaultError::SqliteError(err) => CompressedError::Misc(format!("{}", err)),
             VaultError::NoCorrespondingVault(err) => CompressedError::Misc(format!("{}", err)),
             VaultError::U64Overflow(err) => CompressedError::Misc(format!("{}", err)),
             VaultError::U64Underflow(err) => CompressedError::Misc(format!("{}", err)),
             VaultError::RemoteError(err) => CompressedError::Misc(format!("{}", err)),
-            VaultError::FileAlreadyExist(inode, name) => {
-                CompressedError::FileAlreadyExist(inode, name)
-            }
-            VaultError::CannotFindVaultByName(name) => CompressedError::CannotFindVaultByName(name),
-            VaultError::WriteConflict(err0, err1, err2) => {
-                CompressedError::Misc(format!("{}, {}, {}", err0, err1, err2))
-            }
             VaultError::SystemTimeError(err) => CompressedError::Misc(format!("{}", err)),
             VaultError::IOError(err) => CompressedError::Misc(format!("{}", err)),
             VaultError::RpcError(err) => CompressedError::Misc(format!("{}", err)),
+            VaultError::WrongTypeOfVault(expecting) => CompressedError::Misc(expecting),
+            VaultError::WriteConflict(err0, err1, err2) => {
+                CompressedError::Misc(format!("{}, {}, {}", err0, err1, err2))
+            }
         }
     }
 }
@@ -203,6 +206,27 @@ pub enum GenericVault {
     Local(LocalVault),
     Remote(RemoteVault),
     Caching(CachingVault),
+}
+
+pub fn unpack_to_caching(vault: &mut GenericVault) -> VaultResult<&mut CachingVault> {
+    match vault {
+        GenericVault::Caching(vault) => Ok(vault),
+        _ => Err(VaultError::WrongTypeOfVault("caching".to_string())),
+    }
+}
+
+pub fn unpack_to_local(vault: &mut GenericVault) -> VaultResult<&mut LocalVault> {
+    match vault {
+        GenericVault::Local(vault) => Ok(vault),
+        _ => Err(VaultError::WrongTypeOfVault("local".to_string())),
+    }
+}
+
+pub fn unpack_to_remote(vault: &mut GenericVault) -> VaultResult<&mut RemoteVault> {
+    match vault {
+        GenericVault::Remote(vault) => Ok(vault),
+        _ => Err(VaultError::WrongTypeOfVault("remote".to_string())),
+    }
 }
 
 impl Vault for GenericVault {

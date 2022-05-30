@@ -1,24 +1,23 @@
-use std::collections::HashMap;
-
+use crate::rpc::vault_rpc_server::VaultRpc;
 /// A gRPC server that receives requests and uses local_vault to do the
 /// actual work.
-use crate::rpc::vault_rpc_server;
-use crate::rpc::vault_rpc_server::VaultRpc;
+use crate::rpc::{vault_rpc_server, Acceptance};
 use crate::rpc::{
     DataChunk, DirEntryList, Empty, FileInfo, FileToCreate, FileToOpen, FileToRead, FileToWrite,
-    Inode, Size,
+    Grail, Inode, Size,
 };
 use crate::types::{
-    CompressedError, OpenMode, Vault, VaultError, VaultFileType, VaultRef, VaultResult,
-    GRPC_DATA_CHUNK_SIZE,
+    unpack_to_caching, CompressedError, OpenMode, Vault, VaultError, VaultFileType, VaultRef,
+    VaultResult, GRPC_DATA_CHUNK_SIZE,
 };
 use async_trait::async_trait;
 use log::{debug, info};
+use std::collections::HashMap;
 use tokio::net::TcpListener;
 use tokio::runtime::Builder;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::{Code, Request, Response, Status, Streaming};
+use tonic::{Request, Response, Status, Streaming};
 
 pub fn run_server(address: &str, local_name: &str, vault_map: HashMap<String, VaultRef>) {
     let rt = Builder::new_multi_thread().enable_all().build().unwrap();
@@ -38,6 +37,23 @@ pub fn run_server(address: &str, local_name: &str, vault_map: HashMap<String, Va
 pub struct VaultServer {
     vault_map: HashMap<String, VaultRef>,
     local_name: String,
+}
+
+impl VaultServer {
+    /// `vault_map` should contain all the remote and local vault.
+    pub fn new(local_name: &str, vault_map: HashMap<String, VaultRef>) -> VaultResult<VaultServer> {
+        if vault_map.get(local_name).is_none() {
+            return Err(VaultError::CannotFindVaultByName(local_name.to_string()));
+        }
+        Ok(VaultServer {
+            local_name: local_name.to_string(),
+            vault_map,
+        })
+    }
+
+    fn local(&self) -> &VaultRef {
+        self.vault_map.get(&self.local_name).unwrap()
+    }
 }
 
 /// Translate VaultFileType to rpc message field.
@@ -73,23 +89,6 @@ fn pack_status(err: VaultError) -> Status {
     Status::not_found(encoded)
 }
 
-impl VaultServer {
-    /// `vault_map` should contain all the remote and local vault.
-    pub fn new(local_name: &str, vault_map: HashMap<String, VaultRef>) -> VaultResult<VaultServer> {
-        if vault_map.get(local_name).is_none() {
-            return Err(VaultError::CannotFindVaultByName(local_name.to_string()));
-        }
-        Ok(VaultServer {
-            local_name: local_name.to_string(),
-            vault_map,
-        })
-    }
-
-    fn local(&self) -> &VaultRef {
-        self.vault_map.get(&self.local_name).unwrap()
-    }
-}
-
 #[async_trait]
 impl VaultRpc for VaultServer {
     async fn attr(&self, request: Request<Inode>) -> Result<Response<FileInfo>, Status> {
@@ -107,6 +106,8 @@ impl VaultRpc for VaultServer {
         }))
     }
     type readStream = ReceiverStream<Result<DataChunk, Status>>;
+    type savageStream = ReceiverStream<Result<DataChunk, Status>>;
+
     async fn read(
         &self,
         request: Request<FileToRead>,
@@ -116,16 +117,19 @@ impl VaultRpc for VaultServer {
             "read(file={}, offset={}, size={})",
             request_inner.file, request_inner.offset, request_inner.size
         );
-        // Don't lock the vault when transferring data on wire.
-        let data = {
+        // Don't lock the vault when transferring data on wire. Get
+        // data and version from local vault.
+        let (data, version) = {
             let mut vault = self.local().lock().unwrap();
-            translate_result(vault.read(
+            let data = translate_result(vault.read(
                 request_inner.file,
                 request_inner.offset,
                 request_inner.size,
-            ))?
+            ))?;
+            let version = translate_result(vault.attr(request_inner.file))?.version;
+            (data, version)
         };
-        debug!("data: {:?}", data);
+        // Create the stream that sends messages.
         let (tx, rx) = mpsc::channel(1);
         tokio::spawn(async move {
             let mut offset = request_inner.offset as usize;
@@ -134,13 +138,50 @@ impl VaultRpc for VaultServer {
                 let end = std::cmp::min(offset + blk_size, data.len());
                 let reply = DataChunk {
                     payload: data[offset..end].to_vec(),
+                    version,
                 };
                 tx.send(Ok(reply)).await.unwrap();
                 offset = end;
             }
         });
+        // Return the stream.
         Ok(Response::new(ReceiverStream::new(rx)))
     }
+
+    async fn savage(
+        &self,
+        request: Request<Grail>,
+    ) -> Result<Response<Self::savageStream>, Status> {
+        let req = request.into_inner();
+        info!("chase(vault={}, file={})", req.vault, req.file,);
+        // Get data and version from the caching remote vault.
+        let (data, version) = {
+            match self.vault_map.get(&req.vault) {
+                None => translate_result(Err(VaultError::FileNotExist(req.file))),
+                Some(vault) => {
+                    let mut vault = vault.lock().unwrap();
+                    let caching_remote = translate_result(unpack_to_caching(&mut vault))?;
+                    translate_result(caching_remote.search_in_cache(req.file))
+                }
+            }
+        }?;
+        let (sender, recver) = mpsc::channel(1);
+        tokio::spawn(async move {
+            let mut offset = 0;
+            let blk_size = GRPC_DATA_CHUNK_SIZE;
+            while offset < data.len() {
+                let end = std::cmp::min(offset + blk_size, data.len());
+                let reply = DataChunk {
+                    payload: data[offset..end].to_vec(),
+                    version,
+                };
+                sender.send(Ok(reply)).await.unwrap();
+                offset = end;
+            }
+        });
+        Ok(Response::new(ReceiverStream::new(recver)))
+    }
+
     async fn write(
         &self,
         request: Request<Streaming<FileToWrite>>,
@@ -168,6 +209,13 @@ impl VaultRpc for VaultServer {
         let mut vault = self.local().lock().unwrap();
         let size = translate_result(vault.write(inode, offset, &data))?;
         Ok(Response::new(Size { value: size }))
+    }
+
+    async fn submit(
+        &self,
+        request: Request<Streaming<FileToWrite>>,
+    ) -> Result<Response<Acceptance>, Status> {
+        todo!()
     }
 
     async fn create(&self, request: Request<FileToCreate>) -> Result<Response<Inode>, Status> {

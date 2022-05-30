@@ -85,13 +85,42 @@ impl CachingVault {
     fn main(&self) -> VaultRef {
         Arc::clone(self.remote_map.get(&self.name).unwrap())
     }
-}
 
-fn rpc_err_to_option<T>(result: VaultResult<T>) -> VaultResult<Option<T>> {
-    match result {
-        Ok(val) => Ok(Some(val)),
-        Err(VaultError::RpcError(_)) => Ok(None),
-        Err(err) => Err(err),
+    /// If someone comes savaging for `file`, look in our cache and
+    /// return (data, version) we can find it. If not exist or some
+    /// other error occurs, just return those errors.
+    pub fn search_in_cache(&self, file: Inode) -> VaultResult<(Vec<u8>, u64)> {
+        let cache_lck = self.main();
+        let mut cache = cache_lck.lock().unwrap();
+        let info = cache.attr(file)?;
+        let data = cache.read(file, 0, info.size as u32)?;
+        Ok((data, info.version))
+    }
+
+    /// Savage for the file from other remote vaults.
+    fn savage(&mut self, file: Inode) -> VaultResult<()> {
+        info!("savage({})", file);
+        let my_name = self.name();
+        // TODO: make parallel.
+        for (vault_name, remote) in self.remote_map.iter() {
+            if *vault_name != my_name {
+                let result = unpack_to_remote(&mut remote.lock().unwrap())?.savage(&my_name, file);
+                match result {
+                    Ok((data, version)) => {
+                        debug!("Savage from {} succeeded", vault_name);
+                        local_vault::write(file, 0, &data, &mut self.fd_map)?;
+                        // Make sure written to data file.
+                        self.fd_map.close(file, true)?;
+                        self.database
+                            .set_attr(file, None, None, None, Some(version))?;
+                    }
+                    Err(_) => {
+                        debug!("Savage from {} failed", vault_name);
+                    }
+                }
+            }
+        }
+        Err(VaultError::FileNotExist(file))
     }
 }
 
@@ -175,12 +204,18 @@ impl Vault for CachingVault {
         match connected_case(self.main(), file, &mut self.database, &mut self.fd_map) {
             Ok(()) => return Ok(()),
             Err(VaultError::RpcError(err)) => {
-                return disconnected_case(
+                match disconnected_case(
                     file,
                     VaultError::RpcError(err),
                     &mut self.database,
                     &mut self.fd_map,
-                )
+                ) {
+                    Ok(()) => return Ok(()),
+                    Err(_) => match self.savage(file) {
+                        Ok(_) => return Ok(()),
+                        Err(err) => return Err(err),
+                    },
+                }
             }
             Err(err) => return Err(err),
         }
@@ -206,6 +241,7 @@ impl Vault for CachingVault {
                 let version = remote_meta.version;
                 let data = remote.read(file, 0, remote_meta.size as u32)?;
                 local_vault::write(file, 0, &data, fd_map)?;
+                // Make sure written to data file.
                 fd_map.close(file, true)?;
                 database.set_attr(file, None, None, None, Some(version))?;
             }

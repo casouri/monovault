@@ -64,16 +64,24 @@ struct WriteIterator {
     data: Vec<u8>,
     offset: usize,
     block_size: usize,
+    version: u64,
 }
 
 impl WriteIterator {
     // TODO: Avoid copying.
-    fn new(file: u64, data: &[u8], offset: usize, block_size: usize) -> WriteIterator {
+    fn new(
+        file: u64,
+        data: &[u8],
+        offset: usize,
+        block_size: usize,
+        version: u64,
+    ) -> WriteIterator {
         WriteIterator {
             file,
             data: data.to_vec(),
             offset,
             block_size,
+            version,
         }
     }
 }
@@ -94,6 +102,7 @@ impl Iterator for WriteIterator {
                 file: self.file,
                 offset: self.offset as i64,
                 data: self.data[self.offset..end].to_vec(),
+                version: self.version,
             };
             self.offset = end;
             Some(stuff)
@@ -111,12 +120,35 @@ fn translate_result<T>(res: Result<T, Status>) -> VaultResult<T> {
 }
 
 fn unpack_status(status: Status) -> VaultError {
-    if status.code() == tonic::Code::NotFound {
-        let compressed: CompressedError = serde_json::from_str(status.message()).unwrap();
-        let err: VaultError = compressed.into();
-        err
-    } else {
-        VaultError::RemoteError(status.message().to_string())
+    match status.code() {
+        tonic::Code::NotFound => {
+            let compressed: CompressedError = serde_json::from_str(status.message()).unwrap();
+            let err: VaultError = compressed.into();
+            err
+        }
+        tonic::Code::Unavailable => VaultError::RpcError(status.message().to_string()),
+        _ => VaultError::RemoteError(status.message().to_string()),
+    }
+}
+
+impl RemoteVault {
+    /// Savage for `file` in `vault` in remote's local cache. If found, return (data, version).
+    pub fn savage(&mut self, vault: &str, file: Inode) -> VaultResult<(Vec<u8>, u64)> {
+        self.get_client()?;
+        let client = self.client.as_mut().unwrap();
+        let response = translate_result(self.rt.block_on(client.savage(rpc::Grail {
+            vault: vault.to_string(),
+            file,
+        })))?;
+        let mut stream = response.into_inner();
+        let mut data = vec![];
+        let mut version = 1;
+        while let Some(received) = self.rt.block_on(stream.next()) {
+            let value = translate_result(received)?;
+            data.extend(&value.payload);
+            version = value.version;
+        }
+        Ok((data, version))
     }
 }
 
@@ -174,6 +206,8 @@ impl Vault for RemoteVault {
             data,
             offset as usize,
             GRPC_DATA_CHUNK_SIZE,
+            // Write is for direct writing, so we don't care about the version.
+            0,
         )));
         let response = translate_result(self.rt.block_on(client.write(request)))?;
         Ok(response.into_inner().value)
