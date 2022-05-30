@@ -13,24 +13,30 @@ use crate::types::{
 use async_trait::async_trait;
 use log::{debug, info};
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::runtime::Builder;
+use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-pub fn run_server(address: &str, local_name: &str, vault_map: HashMap<String, VaultRef>) {
-    let rt = Builder::new_multi_thread().enable_all().build().unwrap();
+pub fn run_server(
+    address: &str,
+    local_name: &str,
+    vault_map: HashMap<String, VaultRef>,
+    runtime: Arc<Runtime>,
+) {
     let service = vault_rpc_server::VaultRpcServer::new(
         VaultServer::new(local_name, vault_map).expect("Cannot create server instance"),
     );
     let server = tonic::transport::Server::builder().add_service(service.clone());
-    let incoming = match rt.block_on(TcpListener::bind(address)) {
+    let incoming = match runtime.block_on(TcpListener::bind(address)) {
         Ok(lis) => tokio_stream::wrappers::TcpListenerStream::new(lis),
         Err(err) => panic!("Cannot listen to address: {:?}", err),
     };
     info!("Server started");
-    rt.block_on(server.serve_with_incoming(incoming))
+    runtime
+        .block_on(server.serve_with_incoming(incoming))
         .expect("Error serving requests");
 }
 
@@ -153,18 +159,30 @@ impl VaultRpc for VaultServer {
         request: Request<Grail>,
     ) -> Result<Response<Self::savageStream>, Status> {
         let req = request.into_inner();
-        info!("chase(vault={}, file={})", req.vault, req.file,);
+        info!("savage(vault={}, file={})", req.vault, req.file);
         // Get data and version from the caching remote vault.
-        let (data, version) = {
+        let result: VaultResult<(Vec<u8>, u64)> = {
             match self.vault_map.get(&req.vault) {
-                None => translate_result(Err(VaultError::FileNotExist(req.file))),
+                None => {
+                    debug!("We don't know this vault");
+                    Err(VaultError::FileNotExist(req.file))
+                }
                 Some(vault) => {
                     let mut vault = vault.lock().unwrap();
-                    let caching_remote = translate_result(unpack_to_caching(&mut vault))?;
-                    translate_result(caching_remote.search_in_cache(req.file))
+                    let caching_remote = translate_result(unpack_to_caching(&mut vault));
+                    if let Err(_) = &caching_remote {
+                        debug!("Cannot translate to caching remote, probably because we didn't enable caching");
+                    }
+                    let caching_remote = caching_remote?;
+                    caching_remote.search_in_cache(req.file)
                 }
             }
-        }?;
+        };
+        if let Err(VaultError::FileNotExist(_)) = result {
+            debug!("We can't find the file in cache");
+        }
+        let (data, version) = translate_result(result)?;
+        debug!("We find the file in cache!");
         let (sender, recver) = mpsc::channel(1);
         tokio::spawn(async move {
             let mut offset = 0;

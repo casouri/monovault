@@ -9,6 +9,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use tokio::runtime::Builder;
 
 fn main() {
     env_logger::init();
@@ -53,33 +54,28 @@ fn main() {
     )));
     vaults.push(Arc::clone(&local_vault));
 
+    let runtime = Arc::new(Builder::new_multi_thread().enable_all().build().unwrap());
+
     // Create remote vaults.
     let remote_vaults: Vec<VaultRef> = config
         .peers
         .iter()
         .map(|(name, address)| {
             Arc::new(Mutex::new(GenericVault::Remote(
-                RemoteVault::new(&address, &name).expect("Cannot create remote vault instance"),
+                RemoteVault::new(&address, &name, Arc::clone(&runtime))
+                    .expect("Cannot create remote vault instance"),
             )))
         })
         .collect();
 
-    // Create a remote map, used by caching remotes and vault server.
+    // Create a remote map, used by caching remotes.
     let mut remote_map = HashMap::new();
     for vault in remote_vaults.iter() {
         let vault_name = vault.lock().unwrap().name();
         remote_map.insert(vault_name, Arc::clone(vault));
     }
 
-    // Run vault server. TODO: Add restart?
-    if config.share_local_vault {
-        let mut vault_map = remote_map.clone();
-        vault_map.insert(config.local_vault_name.clone(), Arc::clone(&local_vault));
-        let addr = config.my_address.clone();
-        let _ = thread::spawn(move || run_server(&addr, &config.local_vault_name, vault_map));
-    }
-
-    // Generate the vaults for FUSE.
+    // Generate the vaults for FUSE and vault server.
     let store_path = Path::new(&config.db_path);
     let mut vaults_for_fs = if config.caching {
         remote_vaults
@@ -101,6 +97,26 @@ fn main() {
         remote_vaults
     };
     vaults_for_fs.push(local_vault);
+
+    // Run vault server. TODO: Add restart?
+    if config.share_local_vault {
+        // Vault server uses the same caching remote that FS uses, so
+        // it can responded to savage requests if caching is enabled.
+        let mut maybe_caching_vault_map = HashMap::new();
+        for vault in vaults_for_fs.iter() {
+            let vault_name = vault.lock().unwrap().name();
+            maybe_caching_vault_map.insert(vault_name, Arc::clone(vault));
+        }
+        let addr = config.my_address.clone();
+        let _ = thread::spawn(move || {
+            run_server(
+                &addr,
+                &config.local_vault_name,
+                maybe_caching_vault_map,
+                Arc::clone(&runtime),
+            )
+        });
+    }
 
     // Configure and start FS.
     let mount_point_name = Path::new(&config.mount_point)

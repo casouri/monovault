@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 /// Basically a gRPC client that makes requests to remote vault
 /// servers. This does not mask network error into FileNotFind errors:
 /// caching remote uses this as a backend.
@@ -13,7 +15,7 @@ use tonic::{Request, Status};
 
 #[derive(Debug)]
 pub struct RemoteVault {
-    rt: Runtime,
+    rt: Arc<Runtime>,
     addr: String,
     client: Option<VaultRpcClient<Channel>>,
     name: String,
@@ -36,10 +38,9 @@ fn num2kind(k: i32) -> VaultFileType {
 }
 
 impl RemoteVault {
-    pub fn new(addr: &str, name: &str) -> VaultResult<RemoteVault> {
-        let rt = Builder::new_multi_thread().enable_all().build().unwrap();
+    pub fn new(addr: &str, name: &str, runtime: Arc<Runtime>) -> VaultResult<RemoteVault> {
         return Ok(RemoteVault {
-            rt,
+            rt: runtime,
             addr: addr.to_string(),
             client: None,
             name: name.to_string(),

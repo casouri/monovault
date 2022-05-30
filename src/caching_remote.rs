@@ -89,11 +89,9 @@ impl CachingVault {
     /// If someone comes savaging for `file`, look in our cache and
     /// return (data, version) we can find it. If not exist or some
     /// other error occurs, just return those errors.
-    pub fn search_in_cache(&self, file: Inode) -> VaultResult<(Vec<u8>, u64)> {
-        let cache_lck = self.main();
-        let mut cache = cache_lck.lock().unwrap();
-        let info = cache.attr(file)?;
-        let data = cache.read(file, 0, info.size as u32)?;
+    pub fn search_in_cache(&mut self, file: Inode) -> VaultResult<(Vec<u8>, u64)> {
+        let info = local_vault::attr(file, &mut self.database, &mut self.fd_map)?;
+        let data = local_vault::read(file, 0, info.size as u32, &mut self.fd_map)?;
         Ok((data, info.version))
     }
 
@@ -107,12 +105,14 @@ impl CachingVault {
                 let result = unpack_to_remote(&mut remote.lock().unwrap())?.savage(&my_name, file);
                 match result {
                     Ok((data, version)) => {
-                        debug!("Savage from {} succeeded", vault_name);
+                        debug!("Savage from {} succeeded, version={}", vault_name, version);
                         local_vault::write(file, 0, &data, &mut self.fd_map)?;
                         // Make sure written to data file.
                         self.fd_map.close(file, true)?;
                         self.database
                             .set_attr(file, None, None, None, Some(version))?;
+                        // We succeeded, return.
+                        return Ok(());
                     }
                     Err(_) => {
                         debug!("Savage from {} failed", vault_name);
@@ -120,6 +120,7 @@ impl CachingVault {
                 }
             }
         }
+        // We failed despite asking all the remote.
         Err(VaultError::FileNotExist(file))
     }
 }
@@ -203,14 +204,9 @@ impl Vault for CachingVault {
         // have local changes not yet pushed to remote.
         match connected_case(self.main(), file, &mut self.database, &mut self.fd_map) {
             Ok(()) => return Ok(()),
-            Err(VaultError::RpcError(err)) => {
-                match disconnected_case(
-                    file,
-                    VaultError::RpcError(err),
-                    &mut self.database,
-                    &mut self.fd_map,
-                ) {
-                    Ok(()) => return Ok(()),
+            Err(VaultError::RpcError(_)) => {
+                match disconnected_case(file, &mut self.database, &mut self.fd_map) {
+                    Ok(_) => return Ok(()),
                     Err(_) => match self.savage(file) {
                         Ok(_) => return Ok(()),
                         Err(err) => return Err(err),
@@ -251,23 +247,22 @@ impl Vault for CachingVault {
         // one, report error if we don't.
         fn disconnected_case(
             file: Inode,
-            err: VaultError,
             database: &mut Database,
             fd_map: &FdMap,
         ) -> VaultResult<()> {
-            if local_vault::attr(file, database, fd_map)?.version != 0 {
-                info!(
-                    "open({}) => remote disconnected, we have a local copy",
+            let result = local_vault::attr(file, database, fd_map);
+            match &result {
+                Ok(_) => info!(
+                    "open({}) => remote disconnected, but we have a local copy",
                     file
-                );
-                Ok(())
-            } else {
-                info!(
+                ),
+                Err(_) => info!(
                     "open({}) => remote disconnected, we don't have a local copy",
                     file
-                );
-                Err(err)
-            }
+                ),
+            };
+            result?;
+            Ok(())
         }
     }
 
