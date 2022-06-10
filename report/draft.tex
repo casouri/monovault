@@ -317,7 +317,20 @@ Our rpc interface contains all the function in the previous listing, plus:
 \section{Evaluation}
 \label{sec:org101d5a4}
 
-TBC
+We run three fundamental tests on system functions and described the results in this section. 
+For testing environment, the tests are conducted on Mac OS with Apple M1 chip and 16 GB main memory. The version of rust is rustc 1.59.0 (9d1b2106e 2022-02-23) and the version of fuse is macFUSE 4.2.5. 
+
+For the first test, we have two clients Alice and Bob which are initially connected, so they can both read and write each other’s files. Then Bob is disconnected and Alice modified file “f1” by adding a few lines. We expect that when Bob is back to connection, the modification by Alice can be synced with client Bob.
+The graph below also described the process.\includegraph{evaluation\1.png}
+We found that the modification can be successfully synchronized.
+
+For the second test, we have three clients Alice,Bob and Charlie which are also initially connected. Charlie read one of Bob’s file “f2” before Bob became disconnected. Then Alice tried to read file “f2”. We expect this operation to be successful because Alice can read this file from Charlie who has downloaded file “f2” from Bob.
+The graph below also described the process.\includegraph{evaluation\2.png}
+We found that the Alice can successfully read file “f2”.
+
+For the third test, we have three clients Alice,Bob and Charlie which are also initially connected. Bob read one of A’s file “f3” and made some modifications before Alice became disconnected. Then Charlie read file “f3” from Bob and also made some modification.  At last, all three clients became connected. We expect file “f2”in Alice to contain modifications made by Charlie.
+The graph below also described the process.\includegraph{evaluation\3.png}
+We found that the the file “f2” in Alice can contain modifications made by Charlie successfully .
 
 \section{Future work}
 \label{sec:org88cb1eb}
