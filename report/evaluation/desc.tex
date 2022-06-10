@@ -1,0 +1,9 @@
+For figure1:\\
+There are two clients Alice and Bob, Bob owns file "Bob" with version 1.0. Alice can read file "Bob" 1.0 from client Bob. Then Bob gets offline, Alice can still read and write file "Bob", updates to version 2.0. Once Bob gets online, the updates from Alice can be synchronized to Bob.
+
+For figure2:\\
+There are three clients: Alice, Bob, and Charlie. Charlie reads file "Bob" from client Bob, and stores it into Charlie's own cache. If Bob gets offline, Alice can fetch "Bob" from Charlie.
+
+For figure3:\\
+There are three clients: Bob reads "Alice" version 1.0 from client Alice. Then Alice gets offline, and Bob update to "Alice 2.0". Charlie fetches it, and updates to "Alice 3.0". Once A gets back, both Bob and Charlie would synchronize their file "Alice" to Alice, in version 2.0 and 3.0, respectively, and "Alice 3.0" wins.
+
