@@ -24,7 +24,10 @@ configuration file (a JSON file) should look something like this:
   "db_path": "/Users/yuan/p/cse223/monovault/db",
   "local_vault_name": "pandora",
   "caching": false,
-  "share_local_vault": false
+  "share_local_vault": false,
+  "allow_disconnected_delete": false,
+  "allow_disconnected_create": false,
+  "background_update_interval": 3
 }
 ```
 
@@ -69,7 +72,10 @@ Now we run two instances of monovault locally. Instance A:
   "db_path": "/Users/yuan/p/cse223/monovault/db",
   "local_vault_name": "pandora",
   "caching": false,
-  "share_local_vault": true
+  "share_local_vault": true,
+  "allow_disconnected_delete": false,
+  "allow_disconnected_create": false,
+  "background_update_interval": 3
 }
 ```
 
@@ -91,7 +97,10 @@ Instance B:
   "db_path": "/Users/yuan/p/cse223/monovault/db2",
   "local_vault_name": "moon",
   "caching": false,
-  "share_local_vault": true
+  "share_local_vault": true,
+  "allow_disconnected_delete": false,
+  "allow_disconnected_create": false,
+  "background_update_interval": 3
 }
 ```
 
