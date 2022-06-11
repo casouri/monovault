@@ -315,19 +315,36 @@ submit(file, version)
 
 * Evaluation
 
-In this section we evaluate the correctness of our system. We verify that features like offline editing, hoarding (if you implemented it), savaging and versioned conflict resolution works as we intended.
+In this section we evaluate the correctness of our system. We are able to verify that features like offline editing, hoarding (if you implemented it), savaging and versioned conflict resolution works as we intended.
 
 ** Experimentation setup
-Describe evaluation env: linux version, rust version, other software, etc.
+
+The tests are conducted on macOS with Apple M1 chip and 16 GB main memory. The version of rust is rustc 1.59.0 (9d1b2106e 2022-02-23) and the version of fuse is macFUSE 4.2.5.
 
 ** Offline editing
-Describe how many hosts, their configuration, procedure of test, and result.
+
+For the first test, we have two clients Alice and Bob which are initially connected, so they can both read and write each other’s files. Then Bob is disconnected and Alice modifies file “f1” by adding a few lines. We expect that when Bob is back to connection, the modification by Alice can be synced with client Bob. The graph below also described the process.
+
+[[./evaluation/1.png]]
+
+We found that the modification can be successfully synchronized.
 
 ** Savaging
-Describe how many hosts, their configuration, procedure of test, and result.
+
+For the second test, we have three clients Alice,Bob, and Charlie which are all initially connected. Charlie read one of Bob’s file “f2” before Bob becomes disconnected. Then Alice tries to read file “f2”. We expect this operation to be successful because Alice can read this file from Charlie who has cached file “f2” from Bob. The graph below describes the process.
+
+[[./evaluation/2.png]]
+
+We found that Alice can successfully read file “f2”.
 
 ** Versioning and conflict resolution
-Describe how many hosts, their configuration, procedure of test, and result.
+
+For the third test, we have three clients Alice, Bob, and Charlie which are all initially connected. Bob read one of A’s file “f3” and made some modifications before Alice becomes disconnected. Then Charlie reads file “f3” from Bob and also makes some modification. At last, all three clients are connected back together. We expect file “f2” in Alice to contain modifications made by Charlie.
+The graph below describes the process.
+
+[[./evaluation/3.png]]
+
+We found that the the file “f2” in Alice contains modifications made by Charlie.
 
 * Future work
 
@@ -354,6 +371,10 @@ Preferably the user can extensively control the system and configure how the sys
 A CachingRemote only download (savage) and upload (submit) files from and to a remote host, but a DirectRemote sends open, read, write and close requests to remote hosts. It is possible that a remote host sends an open request and crashed, and never sends the corresponding close request. This is a problem because when someone deletes a file, the filesystem waits for the reference count of the file to drop to zero before deleting the file.
 
 We could solve this problem by adding timed leases to open requests made by remote hosts, or more periodically restart and prune to-be-deleted files upon restart.
+
+** Hoarding
+
+Sadly we are unable to implement hoarding due to time constraint, we plan to implement it in the future.
 
 
 bibliographystyle:plain
