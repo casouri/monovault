@@ -81,7 +81,7 @@ Now we run two instances of monovault locally. Instance A:
 
 Run by
 
-```json
+```shell
 cargo run -- -c /path/to/config.json
 ```
 
@@ -104,7 +104,7 @@ Instance B:
 }
 ```
 
-```json
+```shell
 cargo run -- -c /path/to/config2.json
 ```
 
